@@ -52,7 +52,7 @@ class PoseDetector:
             mp_image, timestamp_ms
         )
 
-        return result
+        return result, timestamp_ms
 
     def close(self):
         self.detector.close()

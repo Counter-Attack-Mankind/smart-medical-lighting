@@ -5,7 +5,8 @@ import cv2
 
 from camera import Camera
 from pose_detector import PoseDetector
-from pose_visualizer import draw_pose
+from pose_visualizer import draw_dashboard, draw_pose
+from pose_analyzer import PoseAnalyzer
 
 
 def main():
@@ -16,17 +17,32 @@ def main():
         camera = Camera(camera_id=0, width=640, height=480)
         detector = PoseDetector()
 
+        analyzer = PoseAnalyzer()
         previous_time = time.perf_counter()
         fps = 0.0
 
-        print("Pose detection started. Press Q to exit.")
+        print("Pose analysis started. Press Q to exit.")
 
         while True:
             frame = camera.read()
 
-            result = detector.detect(frame)
+            # MediaPipe人体关键点检测
+            result, timestamp_ms = detector.detect(frame)
+
+            # NumPy数据转换与连续帧缓存
+            pose_frame = analyzer.update(
+                result,
+                timestamp_ms,
+                frame.shape,
+            )
+
+            # 姿态、连续运动、行为及可靠性统一分析
+            analysis = analyzer.analyze(pose_frame)
+
+            # 绘制人体骨架
             frame = draw_pose(frame, result)
 
+            # FPS计算
             current_time = time.perf_counter()
             dt = current_time - previous_time
             previous_time = current_time
@@ -35,28 +51,7 @@ def main():
                 instant_fps = 1.0 / dt
                 fps = 0.9 * fps + 0.1 * instant_fps
 
-            pose_count = len(result.pose_landmarks)
-
-            cv2.putText(
-                frame, f"FPS: {fps:.1f}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7, (0, 255, 0), 2
-            )
-
-            cv2.putText(
-                frame, f"Persons: {pose_count}",
-                (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7, (0, 255, 0), 2
-            )
-
-            cv2.putText(
-                frame, "Status: RUNNING",
-                (10, 90),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7, (0, 255, 0), 2
-            )
+            frame = draw_dashboard(frame, analysis, fps)
 
             cv2.imshow("MediaPipe Pose Landmarker", frame)
 
