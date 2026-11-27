@@ -1,7 +1,9 @@
 import asyncio
 import json
+import threading
 import time
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -177,6 +179,107 @@ class PerceptionSystemTests(unittest.TestCase):
             self.assertEqual(calls, {"camera": 1, "pose": 1, "face": 1})
         finally:
             system.stop()
+
+
+    def test_observation_time_controls_freshness_and_reports_ages(self):
+        system = PerceptionSystem()
+        now = time.perf_counter()
+        system.records["face"] = {
+            "analysis": {"face_detected": True, "reliability": {"reliable": True}},
+            "captured_at": now - cfg.FACE_RESULT_TTL_SECONDS - 0.2,
+            "generated_at": now,
+            "inference_ms": 3.0,
+        }
+        result = system.snapshot()["face"]
+        self.assertFalse(result["available"])
+        self.assertTrue(result["stale"])
+        self.assertGreater(result["observation_age"], cfg.FACE_RESULT_TTL_SECONDS)
+        self.assertLess(result["result_age"], 0.1)
+        self.assertGreater(result["processing_latency"], cfg.FACE_RESULT_TTL_SECONDS)
+        self.assertIsNone(result["analysis"])
+
+    def test_missing_target_is_not_an_available_observation(self):
+        system = PerceptionSystem()
+        now = time.perf_counter()
+        system.records["pose"] = {
+            "analysis": {"person_detected": False, "reliability": {"overall": 0.0}},
+            "captured_at": now,
+            "generated_at": now,
+            "inference_ms": 2.0,
+        }
+        result = system.snapshot()["pose"]
+        self.assertTrue(result["available"])
+        self.assertFalse(result["target_detected"])
+        self.assertFalse(result["observation_available"])
+
+    def test_waveform_envelope_frequency_and_actual_duration(self):
+        samples = np.linspace(-1.0, 1.0, 1000, dtype=np.float32)
+        envelope = PerceptionSystem.compress_waveform_envelope(samples, max_bins=25)
+        self.assertEqual(len(envelope), 25)
+        self.assertTrue(all(len(pair) == 2 and pair[0] <= pair[1] for pair in envelope))
+
+        system = PerceptionSystem()
+        system.last_waveform_update = 10.0
+        self.assertFalse(system._waveform_update_due(10.05))
+        self.assertTrue(system._waveform_update_due(10.101))
+        self.assertTrue(system._waveform_update_due(10.01, discontinuity=True))
+        system.compressed_waveform = envelope
+        system.waveform_duration = 0.5
+        system.waveform_end_time = time.perf_counter()
+        waveform = system.snapshot()["waveform"]
+        self.assertAlmostEqual(waveform["duration_seconds"], 0.5)
+        self.assertEqual(waveform["envelope"], envelope)
+
+    def test_same_video_sequence_is_not_returned_twice(self):
+        system = PerceptionSystem()
+        system.latest_frame = (
+            7, time.perf_counter(), np.zeros((2, 2, 3), dtype=np.uint8)
+        )
+        self.assertIsNotNone(system._get_latest_frame(6))
+        self.assertIsNone(system._get_latest_frame(7))
+
+    def test_audio_partial_initialization_is_cleaned_up(self):
+        audio = ClosedResource()
+
+        def unavailable_camera(**_kwargs):
+            raise RuntimeError("camera disabled")
+
+        def failing_analyzer():
+            raise RuntimeError("analyzer failed")
+
+        system = PerceptionSystem(
+            camera_factory=unavailable_camera,
+            audio_detector_factory=lambda: audio,
+            audio_analyzer_factory=failing_analyzer,
+        )
+        system.start()
+        try:
+            self.assertTrue(audio.closed)
+            self.assertIsNone(system.audio_detector)
+            self.assertIn("audio", system.errors)
+        finally:
+            system.stop()
+
+    def test_stop_timeout_does_not_close_live_thread_resources(self):
+        system = PerceptionSystem()
+        release = threading.Event()
+        worker = threading.Thread(target=release.wait, name="blocked-test-worker")
+        worker.start()
+        camera = ClosedResource()
+        system.threads = [worker]
+        system.camera = camera
+        system.running = True
+        system.status = "running"
+        try:
+            with patch.object(cfg, "THREAD_JOIN_TIMEOUT_SECONDS", 0.01):
+                self.assertFalse(system.stop())
+            self.assertEqual(system.status, "stop_timeout")
+            self.assertFalse(camera.released)
+        finally:
+            release.set()
+            worker.join(1.0)
+            with patch.object(cfg, "THREAD_JOIN_TIMEOUT_SECONDS", 0.1):
+                system.stop()
 
 
 if __name__ == "__main__":

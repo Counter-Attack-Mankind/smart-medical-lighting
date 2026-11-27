@@ -30,6 +30,7 @@ class AudioAnalyzer:
         self.window_seconds = float(window_seconds)
         self.frames = deque()
         self.f0_history = deque()
+        self.f0_attempt_history = deque()
         self.f0_pending = np.empty(0, dtype=np.float32)
         self.f0_pending_start = None
         self.smoothed_rms = None
@@ -110,6 +111,7 @@ class AudioAnalyzer:
     def reset_temporal(self):
         self.frames.clear()
         self.f0_history.clear()
+        self.f0_attempt_history.clear()
         self.f0_pending = np.empty(0, dtype=np.float32)
         self.f0_pending_start = None
         self.smoothed_rms = None
@@ -136,6 +138,7 @@ class AudioAnalyzer:
                 self.f0_pending_start
                 + cfg.F0_FRAME_SAMPLES / (2.0 * cfg.SAMPLE_RATE)
             )
+            self.f0_attempt_history.append(float(center_time))
             if value is not None:
                 self.f0_history.append((float(center_time), float(value)))
                 new_values.append(value)
@@ -149,6 +152,7 @@ class AudioAnalyzer:
         discontinuity = bool(detection.get("discontinuity", False))
         if not available:
             self._ingest_results(detection)
+            self._mark_history_discontinuous()
             self.reset_temporal()
             frame = AudioFrame(
                 timestamp, None, None, None, False, False, True,
@@ -157,6 +161,7 @@ class AudioAnalyzer:
             self.last_frame = frame
             return frame
         if discontinuity:
+            self._mark_history_discontinuous()
             self.reset_temporal()
 
         samples = np.asarray(detection["samples"], dtype=np.float32).reshape(-1)
@@ -200,12 +205,20 @@ class AudioAnalyzer:
         self.last_frame = frame
         return frame
 
+    def _mark_history_discontinuous(self):
+        if self.last_transcription is not None:
+            self.last_transcription["valid_for_current_stream"] = False
+        if self.last_sound_result is not None:
+            self.last_sound_result["valid_for_current_stream"] = False
+
     def _trim(self, end_time):
         cutoff = end_time - self.window_seconds
         while self.frames and self.frames[0]["end_time"] < cutoff:
             self.frames.popleft()
         while self.f0_history and self.f0_history[0][0] < cutoff:
             self.f0_history.popleft()
+        while self.f0_attempt_history and self.f0_attempt_history[0] < cutoff:
+            self.f0_attempt_history.popleft()
 
     @staticmethod
     def content_unit_count(text):
@@ -238,8 +251,7 @@ class AudioAnalyzer:
         if not self.frames:
             return 0.0, None, None
         valid_duration = sum(item["duration"] for item in self.frames)
-        span = self.frames[-1]["end_time"] - self.frames[0]["start_time"]
-        coverage = float(np.clip(valid_duration / span, 0.0, 1.0)) if span > 0 else 1.0
+        coverage = float(np.clip(valid_duration / self.window_seconds, 0.0, 1.0))
         if valid_duration <= 0.0:
             return coverage, None, None
         speech_duration = sum(
@@ -249,15 +261,18 @@ class AudioAnalyzer:
         return coverage, speech_ratio, float(1.0 - speech_ratio)
 
     def _pitch_statistics(self):
+        attempt_count = len(self.f0_attempt_history)
+        voiced_coverage = (
+            float(len(self.f0_history) / attempt_count) if attempt_count else 0.0
+        )
         if len(self.f0_history) < cfg.F0_MIN_VALID_COUNT:
-            return None, None, 0.0
+            return None, None, voiced_coverage
         values = np.asarray([value for _, value in self.f0_history], dtype=float)
         median = float(np.median(values))
         pitch_range = float(
             np.percentile(values, cfg.PITCH_RANGE_HIGH_PERCENTILE)
             - np.percentile(values, cfg.PITCH_RANGE_LOW_PERCENTILE)
         )
-        voiced_coverage = float(min(1.0, len(values) / cfg.F0_MIN_VALID_COUNT))
         return median, pitch_range, voiced_coverage
 
     @staticmethod
@@ -268,7 +283,11 @@ class AudioAnalyzer:
         observed_time = output.get("observed_time", output.get("timestamp"))
         age = max(0.0, current_time - observed_time) if observed_time is not None else None
         output["age_seconds"] = float(age) if age is not None else None
-        output["is_current"] = bool(age is not None and age <= ttl)
+        output["is_current"] = bool(
+            age is not None
+            and age <= ttl
+            and output.get("valid_for_current_stream", True)
+        )
         return output
 
     @staticmethod
@@ -364,7 +383,7 @@ class AudioAnalyzer:
             ))
         base_features = int(frame.rms is not None) + int(frame.dbfs is not None)
         if frame.speech_detected:
-            feature_coverage = (base_features + int(median_f0 is not None)) / 3.0
+            feature_coverage = (base_features + voiced_coverage) / 3.0
         else:
             feature_coverage = base_features / 2.0
         components = {

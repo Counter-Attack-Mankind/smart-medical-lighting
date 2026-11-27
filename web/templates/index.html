@@ -102,7 +102,7 @@
                         <div class="card-body d-flex flex-column">
                             <div class="bulb-stage">
                                 <svg id="bulb-svg" viewBox="0 0 160 220" role="img" aria-label="虚拟灯泡">
-                                    <defs><filter id="bulb-glow"><feGaussianBlur stdDeviation="10" result="blur"></feGaussianBlur><feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></filter></defs>
+                                    <defs><filter id="bulb-glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur id="bulb-blur" stdDeviation="10" result="blur"></feGaussianBlur><feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs>
                                     <circle id="bulb-halo" cx="80" cy="76" r="58"></circle><path id="bulb-glass" d="M80 18c-34 0-57 25-57 56 0 24 12 38 27 52 8 7 10 18 10 27h40c0-9 2-20 10-27 15-14 27-28 27-52 0-31-23-56-57-56z"></path><path class="bulb-base" d="M58 158h44v12H58zm4 17h36v12H62zm7 17h22l-5 10H74z"></path>
                                 </svg><div class="bulb-lux"><strong id="lighting-current">--</strong><span>lux</span></div>
                             </div>

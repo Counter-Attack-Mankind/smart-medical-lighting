@@ -11,6 +11,7 @@ import numpy as np
 import psutil
 
 from config import audio_config as audio_cfg
+from config import pose_config as pose_cfg
 from config import system_config as cfg
 from src.acquisition.camera import Camera
 from src.audio.audio_analyzer import AudioAnalyzer
@@ -94,12 +95,14 @@ class PerceptionSystem:
             "face": self._placeholder_jpeg("FACE UNAVAILABLE"),
         }
         self.jpeg = {
-            "pose": {"data": self.placeholder_jpeg["pose"], "time": 0.0, "version": 0},
-            "face": {"data": self.placeholder_jpeg["face"], "time": 0.0, "version": 0},
+            "pose": {"data": self.placeholder_jpeg["pose"], "captured_at": 0.0, "version": 0},
+            "face": {"data": self.placeholder_jpeg["face"], "captured_at": 0.0, "version": 0},
         }
         self.waveform = np.empty(0, dtype=np.float32)
         self.compressed_waveform = []
         self.waveform_end_time = None
+        self.waveform_duration = 0.0
+        self.last_waveform_update = 0.0
         self.waveform_limit = int(cfg.WAVEFORM_SECONDS * audio_cfg.SAMPLE_RATE)
         self.history = deque(maxlen=cfg.HISTORY_LIMIT)
         self.last_event_key = None
@@ -204,7 +207,10 @@ class PerceptionSystem:
             except Exception as error:
                 self._record_error("pose", error)
                 if pose_detector is not None:
-                    pose_detector.close()
+                    try:
+                        pose_detector.close()
+                    except Exception as close_error:
+                        self._record_error("pose_cleanup", close_error)
                 self.pose_detector = None
                 self.pose_analyzer = None
             face_detector = None
@@ -215,15 +221,26 @@ class PerceptionSystem:
             except Exception as error:
                 self._record_error("face", error)
                 if face_detector is not None:
-                    face_detector.close()
+                    try:
+                        face_detector.close()
+                    except Exception as close_error:
+                        self._record_error("face_cleanup", close_error)
                 self.face_detector = None
                 self.face_analyzer = None
 
+        audio_detector = None
         try:
-            self.audio_detector = self.audio_detector_factory()
-            self.audio_analyzer = self.audio_analyzer_factory()
+            audio_detector = self.audio_detector_factory()
+            audio_analyzer = self.audio_analyzer_factory()
+            self.audio_detector = audio_detector
+            self.audio_analyzer = audio_analyzer
         except Exception as error:
             self._record_error("audio", error)
+            if audio_detector is not None:
+                try:
+                    audio_detector.close()
+                except Exception as close_error:
+                    self._record_error("audio_cleanup", close_error)
             self.audio_detector = None
             self.audio_analyzer = None
 
@@ -289,12 +306,17 @@ class PerceptionSystem:
 
     def _get_latest_frame(self, last_sequence):
         with self.frame_condition:
-            self.frame_condition.wait_for(
+            updated = self.frame_condition.wait_for(
                 lambda: self.stop_event.is_set()
                 or (self.latest_frame is not None and self.latest_frame[0] != last_sequence),
                 timeout=0.2,
             )
-            if self.stop_event.is_set() or self.latest_frame is None:
+            if (
+                not updated
+                or self.stop_event.is_set()
+                or self.latest_frame is None
+                or self.latest_frame[0] == last_sequence
+            ):
                 return None
             sequence, captured_at, frame = self.latest_frame
             return sequence, captured_at, frame.copy()
@@ -357,7 +379,7 @@ class PerceptionSystem:
                     if encoded_ok:
                         self.jpeg[module] = {
                             "data": encoded.tobytes(),
-                            "time": float(generated_at),
+                            "captured_at": float(captured_at),
                             "version": self.jpeg[module]["version"] + 1,
                         }
                 next_time += interval
@@ -367,6 +389,8 @@ class PerceptionSystem:
             self._record_error(module, error)
 
     def _audio_loop(self):
+        waveform = np.empty(0, dtype=np.float32)
+        waveform_interval = 1.0 / cfg.WAVEFORM_UPDATE_HZ
         try:
             while not self.stop_event.is_set():
                 detection = self.audio_detector.read()
@@ -374,17 +398,31 @@ class PerceptionSystem:
                 analysis = self.audio_analyzer.analyze(frame)
                 generated_at = time.perf_counter()
                 samples = detection.get("samples")
+                discontinuity = bool(detection.get("discontinuity"))
+                if discontinuity:
+                    waveform = np.empty(0, dtype=np.float32)
+                if samples is not None:
+                    samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+                    waveform = np.concatenate((waveform, samples))[-self.waveform_limit:]
+
+                update_waveform = self._waveform_update_due(
+                    generated_at, discontinuity, waveform_interval
+                )
+                envelope = None
+                if update_waveform:
+                    envelope = self.compress_waveform_envelope(waveform)
+                    waveform_duration = len(waveform) / audio_cfg.SAMPLE_RATE
+
                 with self.lock:
-                    if detection.get("discontinuity"):
-                        self.waveform = np.empty(0, dtype=np.float32)
-                        self.compressed_waveform = []
-                    if samples is not None:
-                        samples = np.asarray(samples, dtype=np.float32).reshape(-1)
-                        self.waveform = np.concatenate((self.waveform, samples))[
-                            -self.waveform_limit:
-                        ]
-                        self.waveform_end_time = detection.get("block_end_time")
-                        self.compressed_waveform = self.compress_waveform(self.waveform)
+                    if update_waveform:
+                        self.waveform = waveform
+                        self.compressed_waveform = envelope
+                        self.waveform_duration = float(waveform_duration)
+                        self.waveform_end_time = (
+                            detection.get("block_end_time")
+                            if len(waveform) else None
+                        )
+                        self.last_waveform_update = generated_at
                     self.records["audio"] = {
                         "analysis": self._json_safe(analysis),
                         "captured_at": detection.get("block_end_time"),
@@ -410,30 +448,122 @@ class PerceptionSystem:
                 output.extend((float(np.min(segment)), float(np.max(segment))))
         return output[:max_points]
 
+    @staticmethod
+    def compress_waveform_envelope(samples, max_bins=cfg.WAVEFORM_POINTS // 2):
+        samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if len(samples) == 0:
+            return []
+        bins = min(max(1, int(max_bins)), len(samples))
+        boundaries = np.linspace(0, len(samples), bins + 1, dtype=int)
+        envelope = []
+        for index in range(bins):
+            segment = samples[boundaries[index]:boundaries[index + 1]]
+            if len(segment):
+                envelope.append([
+                    float(np.min(segment)),
+                    float(np.max(segment)),
+                ])
+        return envelope
+
+    def _waveform_update_due(self, now, discontinuity=False, interval=None):
+        interval = interval or (1.0 / cfg.WAVEFORM_UPDATE_HZ)
+        return bool(discontinuity or now - self.last_waveform_update >= interval)
+
     def _module_snapshot(self, module, now, ttl):
         record = self.records[module]
         if record is None:
             return {
-                "available": False, "stale": True, "age_seconds": None,
+                "available": False, "device_available": False,
+                "data_fresh": False, "stale": True,
+                "observation_age": None, "result_age": None,
+                "processing_latency": None, "age_seconds": None,
+                "target_detected": None, "observation_reliable": None,
+                "observation_available": False,
                 "captured_at": None, "generated_at": None,
                 "inference_ms": None, "analysis": None,
             }
-        age = max(0.0, now - record["generated_at"])
-        fresh = age <= ttl
+        captured_at = record.get("captured_at")
+        generated_at = record.get("generated_at")
+        observation_age = (
+            max(0.0, now - captured_at) if captured_at is not None else None
+        )
+        result_age = (
+            max(0.0, now - generated_at) if generated_at is not None else None
+        )
+        processing_latency = (
+            max(0.0, generated_at - captured_at)
+            if captured_at is not None and generated_at is not None else None
+        )
+        result_fresh = bool(result_age is not None and result_age <= ttl)
+        fresh = bool(
+            observation_age is not None
+            and observation_age <= ttl
+            and result_fresh
+        )
         analysis = record["analysis"]
-        observable = not (
+        data_available = not (
             module == "audio"
             and isinstance(analysis, dict)
             and not analysis.get("audio_available", False)
         )
+        resource_available = {
+            "pose": self.camera is not None and self.pose_detector is not None,
+            "face": self.camera is not None and self.face_detector is not None,
+            "audio": self.audio_detector is not None,
+        }.get(module, False)
+        related_errors = {module}
+        if module in ("pose", "face"):
+            related_errors.add("camera")
+        device_available = bool(
+            not related_errors.intersection(self.errors)
+            and (resource_available or record is not None)
+        )
+        detected_key = {"pose": "person_detected", "face": "face_detected"}.get(module)
+        target_detected = (
+            bool(analysis.get(detected_key))
+            if detected_key and isinstance(analysis, dict) and detected_key in analysis
+            else None
+        )
+        reliability = analysis.get("reliability") if isinstance(analysis, dict) else None
+        observation_reliable = (
+            bool(reliability.get("reliable"))
+            if isinstance(reliability, dict) and "reliable" in reliability else None
+        )
+        if module == "pose" and isinstance(analysis, dict):
+            observation_reliable = (
+                bool(
+                    target_detected
+                    and analysis.get("activity_scope") != "none"
+                    and analysis.get("temporal_coverage", 0.0)
+                    >= pose_cfg.MIN_TEMPORAL_COVERAGE
+                )
+                if target_detected is not None else None
+            )
+        available = bool(device_available and fresh and data_available)
+        observation_available = bool(
+            available
+            and target_detected is not False
+            and observation_reliable is not False
+        )
         return {
-            "available": bool(fresh and observable),
+            "available": available,
+            "device_available": device_available,
+            "data_fresh": fresh,
             "stale": not fresh,
-            "age_seconds": float(age),
-            "captured_at": record["captured_at"],
-            "generated_at": record["generated_at"],
+            "age_seconds": observation_age,
+            "observation_age": observation_age,
+            "result_age": result_age,
+            "processing_latency": processing_latency,
+            "target_detected": target_detected,
+            "observation_reliable": observation_reliable,
+            "observation_available": observation_available,
+            "captured_at": captured_at,
+            "generated_at": generated_at,
             "inference_ms": record["inference_ms"],
-            "analysis": copy.deepcopy(analysis) if fresh else None,
+            "analysis": (
+                copy.deepcopy(analysis)
+                if fresh or (module == "audio" and result_fresh) else None
+            ),
         }
 
     def _fusion_snapshot(self):
@@ -461,6 +591,7 @@ class PerceptionSystem:
             face = self._module_snapshot("face", now, cfg.FACE_RESULT_TTL_SECONDS)
             audio = self._module_snapshot("audio", now, cfg.AUDIO_RESULT_TTL_SECONDS)
             waveform_values = copy.deepcopy(self.compressed_waveform)
+            waveform_duration = self.waveform_duration
             waveform_age = (
                 max(0.0, now - self.waveform_end_time)
                 if self.waveform_end_time is not None else None
@@ -492,8 +623,9 @@ class PerceptionSystem:
                 "stale": not waveform_available,
                 "age_seconds": waveform_age,
                 "sample_rate": audio_cfg.SAMPLE_RATE,
-                "duration_seconds": cfg.WAVEFORM_SECONDS,
-                "values": waveform_values if waveform_available else [],
+                "duration_seconds": waveform_duration if waveform_available else 0.0,
+                "configured_duration_seconds": cfg.WAVEFORM_SECONDS,
+                "envelope": waveform_values if waveform_available else [],
             },
             "fusion": self._fusion_snapshot(),
             "lighting": lighting,
@@ -507,7 +639,7 @@ class PerceptionSystem:
         now = time.perf_counter()
         with self.lock:
             item = self.jpeg[module]
-            if now - item["time"] > cfg.VIDEO_FRAME_TTL_SECONDS:
+            if now - item["captured_at"] > cfg.VIDEO_FRAME_TTL_SECONDS:
                 return self.placeholder_jpeg[module], item["version"]
             return item["data"], item["version"]
 
@@ -563,6 +695,14 @@ class PerceptionSystem:
         deadline = time.perf_counter() + cfg.THREAD_JOIN_TIMEOUT_SECONDS
         for thread in self.threads:
             thread.join(max(0.0, deadline - time.perf_counter()))
+        alive_threads = [thread.name for thread in self.threads if thread.is_alive()]
+        if alive_threads:
+            message = "工作线程未在超时内退出：" + ", ".join(alive_threads)
+            with self.lock:
+                self.errors["shutdown"] = message
+                self.status = "stop_timeout"
+            self.add_event("system_error", message)
+            return False
         for resource, method in (
             (self.pose_detector, "close"),
             (self.face_detector, "close"),
@@ -582,3 +722,4 @@ class PerceptionSystem:
             self.running = False
             self.status = "stopped"
         self.add_event("system", "统一感知系统已停止")
+        return True

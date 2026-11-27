@@ -3,18 +3,15 @@
 
     const byId = (id) => document.getElementById(id);
     let bound = false;
+    let connected = false;
+    let editing = false;
     let requestInFlight = false;
+    let backendState = null;
 
     async function postJSON(url, body) {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify(body),
-        });
+        const response = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
         const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-            throw new Error(data.detail || `HTTP ${response.status}`);
-        }
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
         return data;
     }
 
@@ -24,55 +21,95 @@
         node.className = `small mt-2 ${isError ? "text-danger" : "text-success"}`;
     }
 
+    function setControlAvailability() {
+        const disabled = !connected || requestInFlight;
+        byId("mode-manual").disabled = disabled;
+        byId("mode-automatic").disabled = disabled;
+        byId("lux-slider").disabled = disabled || backendState?.mode !== "manual";
+    }
+
+    function renderBulb(currentLux) {
+        const ratio = Math.max(0, Math.min(1, Number(currentLux || 0) / 600));
+        const glass = byId("bulb-glass");
+        const halo = byId("bulb-halo");
+        if (ratio === 0) {
+            glass.style.fill = "rgb(214, 220, 226)";
+            glass.style.stroke = "rgb(126, 139, 151)";
+            glass.style.filter = "none";
+            halo.style.opacity = "0";
+            halo.style.transform = "scale(.72)";
+            return;
+        }
+        const eased = Math.pow(ratio, 0.72);
+        glass.style.fill = `rgb(${Math.round(174 + 81 * eased)}, ${Math.round(158 + 84 * eased)}, ${Math.round(112 + 76 * eased)})`;
+        glass.style.stroke = `rgb(${Math.round(142 + 65 * eased)}, ${Math.round(126 + 64 * eased)}, ${Math.round(86 + 45 * eased)})`;
+        glass.style.filter = "url(#bulb-glow)";
+        halo.style.opacity = String(0.08 + 0.55 * eased);
+        halo.style.transform = `scale(${0.78 + 0.38 * eased})`;
+        byId("bulb-blur").setAttribute("stdDeviation", String(3 + 12 * eased));
+    }
+
+    function update(lighting, forceEditor = false) {
+        if (!lighting) return;
+        backendState = {...lighting};
+        const manual = lighting.mode === "manual";
+        byId("mode-manual").classList.toggle("active", manual);
+        byId("mode-automatic").classList.toggle("active", !manual);
+        if ((!editing && !requestInFlight) || forceEditor) {
+            byId("lux-slider").value = lighting.target_lux ?? 0;
+            byId("lighting-target").textContent = lighting.target_lux ?? "--";
+        }
+        byId("lighting-current").textContent = lighting.current_lux ?? "--";
+        byId("lighting-reason").textContent = lighting.reason || "--";
+        byId("lighting-status").textContent = lighting.status === "confirmed" ? "已确认" : (lighting.status === "pending" ? "待接入" : (lighting.status || "--"));
+        renderBulb(lighting.current_lux);
+        setControlAvailability();
+    }
+
     async function changeMode(mode) {
-        if (requestInFlight) return;
+        if (!connected || requestInFlight) return;
         requestInFlight = true;
+        setControlAvailability();
         feedback("正在提交控制模式…", false);
         try {
             const response = await postJSON("/api/lighting/mode", {mode});
-            update(response.lighting);
+            update(response.lighting, true);
             feedback("控制模式已由后端确认", false);
         } catch (error) {
+            update(backendState, true);
             feedback(`控制失败：${error.message}`, true);
         } finally {
             requestInFlight = false;
+            setControlAvailability();
         }
     }
 
     async function changeLux(value) {
-        if (requestInFlight) return;
+        if (!connected || requestInFlight || backendState?.mode !== "manual") return;
+        editing = false;
         requestInFlight = true;
+        setControlAvailability();
         feedback("正在提交仿真照度…", false);
         try {
             const response = await postJSON("/api/lighting/manual", {lux: Number(value)});
-            update(response.lighting);
+            update(response.lighting, true);
             feedback("仿真照度已由后端确认", false);
         } catch (error) {
+            update(backendState, true);
             feedback(`调节失败：${error.message}`, true);
         } finally {
             requestInFlight = false;
+            setControlAvailability();
         }
     }
 
-    function update(lighting) {
-        if (!lighting) return;
-        const manual = lighting.mode === "manual";
-        byId("mode-manual").classList.toggle("active", manual);
-        byId("mode-automatic").classList.toggle("active", !manual);
-        byId("lux-slider").disabled = !manual || requestInFlight;
-        byId("lux-slider").value = lighting.target_lux ?? 0;
-        byId("lighting-target").textContent = lighting.target_lux ?? "--";
-        byId("lighting-current").textContent = lighting.current_lux ?? "--";
-        byId("lighting-reason").textContent = lighting.reason || "--";
-        byId("lighting-status").textContent = lighting.status === "confirmed" ? "已确认" : (lighting.status === "pending" ? "待接入" : (lighting.status || "--"));
-
-        const ratio = Math.max(0, Math.min(1, Number(lighting.current_lux || 0) / 600));
-        const warm = Math.round(90 + ratio * 165);
-        const glass = byId("bulb-glass");
-        const halo = byId("bulb-halo");
-        glass.style.fill = `rgb(255, ${warm}, 70)`;
-        glass.style.filter = ratio > 0.05 ? "url(#bulb-glow)" : "none";
-        halo.style.opacity = String(0.05 + ratio * 0.42);
+    function setConnected(value) {
+        connected = Boolean(value);
+        if (!connected) {
+            editing = false;
+            feedback("实时连接不可用，控制已暂时禁用", true);
+        }
+        setControlAvailability();
     }
 
     function bind() {
@@ -80,11 +117,20 @@
         bound = true;
         byId("mode-manual").addEventListener("click", () => changeMode("manual"));
         byId("mode-automatic").addEventListener("click", () => changeMode("automatic"));
-        byId("lux-slider").addEventListener("input", (event) => {
+        const slider = byId("lux-slider");
+        slider.addEventListener("pointerdown", () => { editing = true; });
+        slider.addEventListener("touchstart", () => { editing = true; }, {passive: true});
+        slider.addEventListener("keydown", () => { editing = true; });
+        slider.addEventListener("input", (event) => {
+            editing = true;
             byId("lighting-target").textContent = event.target.value;
         });
-        byId("lux-slider").addEventListener("change", (event) => changeLux(event.target.value));
+        slider.addEventListener("change", (event) => changeLux(event.target.value));
+        slider.addEventListener("blur", () => {
+            if (editing && !requestInFlight) changeLux(slider.value);
+        });
+        setControlAvailability();
     }
 
-    window.LightingControls = {bind, update};
+    window.LightingControls = {bind, update, setConnected};
 })();

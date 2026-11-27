@@ -191,7 +191,7 @@ class YAMNetDetector:
 
 
 class AudioDetector:
-    """Own one microphone and synchronously schedule all three detectors."""
+    """Own one microphone and schedule VAD, ASR and YAMNet processing."""
 
     def __init__(
         self,
@@ -228,6 +228,10 @@ class AudioDetector:
             max_workers=1, thread_name_prefix="sensevoice-asr"
         )
         self.asr_future = None
+        self.asr_future_generation = None
+        self.stream_generation = 0
+        self.asr_failure_count = 0
+        self.last_asr_error = None
         self.dropped_asr_segments = 0
         self.closed = False
 
@@ -246,6 +250,7 @@ class AudioDetector:
         if hasattr(self.yamnet_detector, "reset"):
             self.yamnet_detector.reset()
         self.pending_segments.clear()
+        self.stream_generation += 1
         self.last_timestamp = None
         self.last_sample_count = None
         self.reset_count += 1
@@ -261,9 +266,13 @@ class AudioDetector:
         samples, timestamp = self.microphone.read(timeout=timeout)
         status = self._buffer_status()
         status["dropped_asr_segments"] = int(self.dropped_asr_segments)
+        status["asr_failure_count"] = int(self.asr_failure_count)
+        status["last_asr_error"] = self.last_asr_error
         if samples is None:
             if self.stream_available:
                 self._reset_stream()
+                for item in completed:
+                    item["valid_for_current_stream"] = False
             return self._unavailable_result(
                 time.perf_counter(), status, "read_timeout", completed
             )
@@ -272,6 +281,10 @@ class AudioDetector:
         result["buffer_status"]["dropped_asr_segments"] = int(
             self.dropped_asr_segments
         )
+        result["buffer_status"]["asr_failure_count"] = int(
+            self.asr_failure_count
+        )
+        result["buffer_status"]["last_asr_error"] = self.last_asr_error
         processing = bool(self.asr_future is not None or self.pending_segments)
         result["processing"] = processing
         if processing and not result["transcriptions"]:
@@ -310,11 +323,13 @@ class AudioDetector:
                 "duration": float(segment["duration"]),
                 "observed_time": float(segment["end_time"]),
                 "produced_time": float(time.perf_counter()),
+                "stream_generation": int(self.stream_generation),
+                "valid_for_current_stream": True,
             })
             completed.append(recognition)
         return completed
 
-    def _recognize_segment(self, segment):
+    def _recognize_segment(self, segment, stream_generation):
         recognition = self.asr_detector.recognize(segment["samples"])
         recognition.update({
             "start_time": float(segment["start_time"]),
@@ -322,21 +337,32 @@ class AudioDetector:
             "duration": float(segment["duration"]),
             "observed_time": float(segment["end_time"]),
             "produced_time": float(time.perf_counter()),
+            "stream_generation": int(stream_generation),
         })
         return recognition
 
     def _schedule_async_asr(self):
         if self.asr_future is None and self.pending_segments:
             segment = self.pending_segments.pop(0)
+            self.asr_future_generation = self.stream_generation
             self.asr_future = self.asr_executor.submit(
-                self._recognize_segment, segment
+                self._recognize_segment, segment, self.asr_future_generation
             )
 
     def _poll_async_asr(self):
         completed = []
         if self.asr_future is not None and self.asr_future.done():
-            completed.append(self.asr_future.result())
+            try:
+                recognition = self.asr_future.result()
+                recognition["valid_for_current_stream"] = bool(
+                    self.asr_future_generation == self.stream_generation
+                )
+                completed.append(recognition)
+            except Exception as error:
+                self.asr_failure_count += 1
+                self.last_asr_error = f"{type(error).__name__}: {error}"
             self.asr_future = None
+            self.asr_future_generation = None
         self._schedule_async_asr()
         return completed
 
@@ -364,6 +390,8 @@ class AudioDetector:
                 reasons.append("input_overflow")
         if reasons:
             self._reset_stream()
+            for item in completed_transcriptions or []:
+                item["valid_for_current_stream"] = False
 
         vad_start = time.perf_counter()
         speech_detected, segments = self.vad_detector.detect(samples, timestamp)

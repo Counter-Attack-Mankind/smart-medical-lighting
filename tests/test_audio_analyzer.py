@@ -148,6 +148,27 @@ class BlockingFakeAsr(WorkingFakeAsr):
         return result
 
 
+class RepeatedSegmentVad(FakeVad):
+    def detect(self, samples, timestamp):
+        return False, [{
+            "samples": samples.copy(),
+            "start_time": timestamp,
+            "end_time": timestamp + len(samples) / cfg.SAMPLE_RATE,
+            "duration": len(samples) / cfg.SAMPLE_RATE,
+        }]
+
+
+class FailingThenWorkingAsr(WorkingFakeAsr):
+    def __init__(self):
+        self.calls = 0
+
+    def recognize(self, samples):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("synthetic ASR failure")
+        return super().recognize(samples)
+
+
 class TestAudioAnalyzer(unittest.TestCase):
     def test_sine_rms_dbfs_and_f0(self):
         time_axis = np.arange(cfg.SAMPLE_RATE) / cfg.SAMPLE_RATE
@@ -301,6 +322,97 @@ class TestAudioAnalyzer(unittest.TestCase):
         finally:
             asr.release.set()
             detector.close()
+
+    def test_async_asr_failure_is_isolated_and_next_segment_continues(self):
+        detector = AudioDetector(
+            microphone=FakeMicrophone(block_count=4),
+            vad_detector=RepeatedSegmentVad(),
+            asr_detector=FailingThenWorkingAsr(),
+            yamnet_detector=FakeYamnet(),
+            start_microphone=False,
+        )
+        try:
+            detector.read()
+            with self.assertRaises(RuntimeError):
+                detector.asr_future.result(timeout=0.5)
+            second = detector.read()
+            self.assertEqual(second["buffer_status"]["asr_failure_count"], 1)
+            self.assertTrue(second["processing"])
+            detector.asr_future.result(timeout=0.5)
+            third = detector.read()
+            self.assertEqual(third["transcriptions"][0]["text"], "测试")
+            self.assertEqual(third["buffer_status"]["asr_failure_count"], 1)
+        finally:
+            detector.close()
+
+    def test_reset_marks_inflight_asr_result_as_historical(self):
+        asr = BlockingFakeAsr()
+        detector = AudioDetector(
+            microphone=FakeMicrophone(block_count=2),
+            vad_detector=SegmentVad(),
+            asr_detector=asr,
+            yamnet_detector=FakeYamnet(),
+            start_microphone=False,
+        )
+        try:
+            detector.read()
+            self.assertTrue(asr.started.wait(0.5))
+            detector.reset()
+            asr.release.set()
+            self.assertTrue(asr.finished.wait(0.5))
+            detector.asr_future.result(timeout=0.5)
+            result = detector.read()
+            self.assertFalse(result["transcriptions"][0]["valid_for_current_stream"])
+            analyzer = AudioAnalyzer()
+            output = analyzer.analyze(analyzer.update(result))
+            self.assertFalse(output["transcription"]["is_current"])
+        finally:
+            asr.release.set()
+            detector.close()
+
+    def test_temporal_and_voiced_coverage_use_actual_window_counts(self):
+        analyzer = AudioAnalyzer(window_seconds=10.0)
+        samples = np.zeros(cfg.BLOCK_SIZE, dtype=np.float32)
+        analyzer.update(detection(samples=samples, timestamp=0.0, speech=False))
+        output = analyzer.analyze()
+        self.assertAlmostEqual(
+            output["temporal_coverage"],
+            cfg.BLOCK_SIZE / cfg.SAMPLE_RATE / 10.0,
+        )
+
+        analyzer.f0_attempt_history.extend(float(index) for index in range(10))
+        analyzer.f0_history.extend((float(index), 180.0) for index in range(3))
+        median, _pitch_range, coverage = analyzer._pitch_statistics()
+        self.assertEqual(median, 180.0)
+        self.assertAlmostEqual(coverage, 0.3)
+
+    def test_audio_interruption_invalidates_recent_history_immediately(self):
+        analyzer = AudioAnalyzer()
+        transcript = {
+            "text": "测试历史",
+            "duration": 1.0,
+            "observed_time": 1.0,
+            "produced_time": 1.01,
+            "speech_state": "transcribed",
+        }
+        sound = {
+            "timestamp": 1.0,
+            "start_time": 0.5,
+            "end_time": 1.0,
+            "class_count": 521,
+            "sound_events": [],
+            "raw_top": [],
+            "inference_ms": 1.0,
+        }
+        analyzer.update(detection(
+            timestamp=1.0, transcriptions=[transcript], sound_results=[sound]
+        ))
+        interrupted = analyzer.analyze(analyzer.update(detection(
+            samples=None, timestamp=1.1, available=False, discontinuity=True
+        )))
+        self.assertEqual(interrupted["transcription"]["text"], "测试历史")
+        self.assertFalse(interrupted["transcription"]["is_current"])
+        self.assertFalse(interrupted["sound_event_result"]["is_current"])
 
     def test_strict_json_output(self):
         analyzer = AudioAnalyzer()

@@ -17,21 +17,31 @@
     let socket = null;
     let reconnectDelay = 500;
     let lastMessageAt = 0;
+    let realtimeInvalidated = true;
 
     function translated(value) {
         return value === null || value === undefined ? "--" : (labels[value] || String(value));
     }
 
-    function setConnection(connected, text) {
+    function setConnection(connected, text, enableControls = connected) {
         byId("connection-text").textContent = text;
         const dot = byId("connection-dot");
         dot.className = `status-dot ${connected ? "status-dot-animated bg-green" : "bg-red"}`;
+        window.LightingControls.setConnected(enableControls);
     }
 
-    function setBadge(id, available, stale) {
+    function setBadge(id, module) {
         const node = byId(id);
-        node.textContent = available ? "实时" : (stale ? "过期/不可用" : "不可用");
-        node.className = `badge ${available ? "bg-green-lt" : "bg-secondary-lt"}`;
+        let text = "实时";
+        let style = "bg-green-lt";
+        if (!module.device_available) { text = "设备不可用"; style = "bg-secondary-lt"; }
+        else if (module.analysis?.audio_available === false) { text = "数据不可用"; style = "bg-secondary-lt"; }
+        else if (module.stale) { text = "数据已过期"; style = "bg-yellow-lt"; }
+        else if (!module.available) { text = "数据不可用"; style = "bg-secondary-lt"; }
+        else if (module.target_detected === false) { text = "未检测到目标"; style = "bg-blue-lt"; }
+        else if (module.observation_reliable === false) { text = "信息不足"; style = "bg-yellow-lt"; }
+        node.textContent = text;
+        node.className = `badge ${style}`;
     }
 
     function setProgress(id, textId, score) {
@@ -46,10 +56,11 @@
     }
 
     function updatePose(module, performance) {
-        setBadge("pose-status", module.available, module.stale);
+        setBadge("pose-status", module);
         const analysis = module.available ? module.analysis : null;
-        byId("pose-posture").textContent = translated(analysis?.posture);
-        byId("pose-motion").textContent = translated(analysis?.motion_state);
+        const personAbsent = module.available && module.target_detected === false;
+        byId("pose-posture").textContent = personAbsent ? "未检测到人体" : translated(analysis?.posture);
+        byId("pose-motion").textContent = personAbsent ? "--" : translated(analysis?.motion_state);
         const behaviors = analysis?.behaviors || {};
         const active = Object.entries(behaviors).filter(([, value]) => value === true).map(([name]) => translated(name));
         byId("pose-behavior").textContent = active.length ? active.join("、") : (analysis ? "未检测到" : "--");
@@ -59,9 +70,10 @@
     }
 
     function updateFace(module, performance) {
-        setBadge("face-status", module.available, module.stale);
+        setBadge("face-status", module);
         const analysis = module.available ? module.analysis : null;
-        byId("face-expression").textContent = translated(analysis?.stable_expression);
+        const faceAbsent = module.available && module.target_detected === false;
+        byId("face-expression").textContent = faceAbsent ? "未检测到人脸" : translated(analysis?.stable_expression);
         byId("face-activity").textContent = fmt(analysis?.face_activity_score, 2);
         const head = analysis?.head_pose;
         byId("face-head").textContent = head ? `${fmt(head.yaw)}° / ${fmt(head.pitch)}° / ${fmt(head.roll)}°` : "--";
@@ -89,7 +101,7 @@
     }
 
     function updateAudio(module) {
-        setBadge("audio-status", module.available, module.stale);
+        setBadge("audio-status", module);
         const analysis = module.analysis || null;
         byId("speech-active").textContent = analysis?.speech_active === true ? "检测到" : (analysis?.speech_active === false ? "未检测到" : "--");
         byId("speech-state").textContent = translated(analysis?.speech_state);
@@ -104,7 +116,10 @@
         if (transcription) {
             const current = transcription.is_current ? "当前有效" : "最近历史结果";
             const parts = [current, `年龄 ${fmt(transcription.age_seconds)} s`];
-            if (transcription.observed_time !== null && transcription.observed_time !== undefined) parts.push(`观测 ${fmt(transcription.observed_time, 3)} s（单调时钟）`);
+            if (Number.isFinite(Number(transcription.age_seconds))) {
+                const observed = new Date(Date.now() - Number(transcription.age_seconds) * 1000);
+                parts.push(`最近转写 ${observed.toLocaleTimeString("zh-CN", {hour12: false})}`);
+            }
             if (transcription.language) parts.push(`语言 ${transcription.language}`);
             if (transcription.emotion) parts.push(`模型情感标签 ${transcription.emotion}`);
             if (transcription.event) parts.push(`模型事件标签 ${transcription.event}`);
@@ -113,12 +128,20 @@
             byId("transcript-meta").textContent = "历史转写与当前语音状态分开显示";
         }
         const sound = analysis?.sound_event_result;
-        byId("sound-events").innerHTML = sound?.is_current ? eventRows(sound.events) : eventRows([]);
+        if (!module.available) {
+            byId("sound-events").innerHTML = '<span class="text-secondary">声音事件识别不可用</span>';
+        } else if (!sound) {
+            byId("sound-events").innerHTML = '<span class="text-secondary">等待有效声音分类窗口</span>';
+        } else if (!sound.is_current) {
+            byId("sound-events").innerHTML = '<span class="text-secondary">声音事件结果已过期</span>';
+        } else {
+            byId("sound-events").innerHTML = eventRows(sound.events);
+        }
     }
 
     const quadrantPlugin = {
         id: "quadrants",
-        beforeDraw(chartInstance) {
+        beforeDatasetsDraw(chartInstance) {
             const {ctx, chartArea, scales} = chartInstance;
             if (!chartArea) return;
             const x0 = scales.x.getPixelForValue(0);
@@ -131,6 +154,12 @@
             ctx.fillStyle = "rgba(70,82,96,.55)"; ctx.font = "12px sans-serif";
             ctx.fillText("紧张烦躁", left + 8, top + 16); ctx.fillText("愉悦活跃", x0 + 8, top + 16);
             ctx.fillText("低落消沉", left + 8, y0 + 18); ctx.fillText("平静放松", x0 + 8, y0 + 18);
+            const radius = Math.min(
+                Math.abs(scales.x.getPixelForValue(1) - x0),
+                Math.abs(scales.y.getPixelForValue(1) - y0)
+            );
+            ctx.strokeStyle = "rgba(70,82,96,.42)"; ctx.lineWidth = 1.2;
+            ctx.beginPath(); ctx.arc(x0, y0, radius, 0, Math.PI * 2); ctx.stroke();
             ctx.restore();
         },
     };
@@ -162,10 +191,18 @@
         const base = fusion?.base_weights || {};
         const effectiveV = fusion?.effective_weights?.valence || {};
         const effectiveA = fusion?.effective_weights?.arousal || {};
+        const modalityNames = {pose: "人体动作", face: "面部表情", speech_content: "语音内容", speech_prosody: "语音韵律"};
+        const weightCell = (label, value, color) => {
+            const percent = value === null || value === undefined ? null : clamp01(value) * 100;
+            return `<div class="weight-cell"><div class="weight-caption"><span>${label}</span><span>${percent === null ? "--" : `${percent.toFixed(0)}%`}</span></div><div class="progress"><div class="progress-bar ${color}" style="width:${percent ?? 0}%"></div></div></div>`;
+        };
         byId("fusion-weights").innerHTML = Object.keys(base).map((name) =>
-            `<span>${escapeHtml(name)}：基础 ${fmt(base[name], 2)} / V ${fmt(effectiveV[name], 2)} / A ${fmt(effectiveA[name], 2)}</span>`).join("");
+            `<div class="weight-row"><strong>${escapeHtml(modalityNames[name] || name)}</strong><div class="weight-bars">${weightCell("基础", base[name], "bg-secondary")}${weightCell("V", effectiveV[name], "bg-blue")}${weightCell("A", effectiveA[name], "bg-orange")}</div></div>`).join("");
         if (chart) {
-            const trajectory = Array.isArray(fusion?.trajectory) ? fusion.trajectory.slice(-30) : [];
+            const allPoints = Array.isArray(fusion?.trajectory) ? fusion.trajectory : [];
+            const timedPoints = allPoints.filter((point) => Number.isFinite(Number(point.timestamp)));
+            const latestTime = timedPoints.length ? Math.max(...timedPoints.map((point) => Number(point.timestamp))) : null;
+            const trajectory = latestTime === null ? [] : timedPoints.filter((point) => Number(point.timestamp) >= latestTime - 30);
             chart.data.datasets[0].data = trajectory.filter((p) => Number.isFinite(p.valence) && Number.isFinite(p.arousal)).map((p) => ({x: p.valence, y: p.arousal}));
             chart.data.datasets[1].data = available && Number.isFinite(fusion.valence) && Number.isFinite(fusion.arousal) ? [{x: fusion.valence, y: fusion.arousal}] : [];
             chart.update("none");
@@ -182,19 +219,45 @@
         ctx.scale(ratio, ratio);
         const width = rect.width, height = rect.height;
         ctx.clearRect(0, 0, width, height);
-        ctx.strokeStyle = "#dce3ea"; ctx.beginPath(); ctx.moveTo(0, height / 2); ctx.lineTo(width, height / 2); ctx.stroke();
-        const values = waveform?.available ? waveform.values : [];
-        byId("waveform-status").textContent = waveform?.available ? `最近 ${waveform.duration_seconds} 秒压缩波形` : "不可用";
-        if (!values?.length) {
+        const envelope = waveform?.available ? waveform.envelope : [];
+        const duration = Number(waveform?.duration_seconds || 0);
+        byId("waveform-status").textContent = waveform?.available ? `有效窗口 ${duration.toFixed(2)} 秒` : "不可用";
+        const left = 36, right = 8, top = 8, bottom = 18;
+        const plotWidth = Math.max(1, width - left - right), plotHeight = Math.max(1, height - top - bottom);
+        ctx.strokeStyle = "rgba(210,225,238,.24)"; ctx.fillStyle = "#a9bac8"; ctx.font = "10px sans-serif";
+        [-1, 0, 1].forEach((value) => {
+            const y = top + (1 - (value + 1) / 2) * plotHeight;
+            ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(width - right, y); ctx.stroke();
+            ctx.fillText(String(value), 8, y + 3);
+        });
+        ctx.fillText(`-${duration.toFixed(1)}s`, left, height - 4); ctx.fillText("0s", width - 23, height - 4);
+        if (!envelope?.length) {
             ctx.fillStyle = "#667382"; ctx.font = "14px sans-serif"; ctx.fillText("暂无连续音频数据", 12, height / 2 - 10); return;
         }
-        ctx.strokeStyle = "#206bc4"; ctx.lineWidth = 1.2; ctx.beginPath();
-        values.forEach((value, index) => {
-            const x = values.length === 1 ? 0 : index / (values.length - 1) * width;
-            const y = height / 2 - Math.max(-1, Math.min(1, Number(value))) * height * .44;
-            if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        ctx.strokeStyle = "#58c8ff"; ctx.lineWidth = 1;
+        envelope.forEach((pair, index) => {
+            const x = left + (index + .5) / envelope.length * plotWidth;
+            const minimum = Math.max(-1, Math.min(1, Number(pair[0])));
+            const maximum = Math.max(-1, Math.min(1, Number(pair[1])));
+            const yMin = top + (1 - (minimum + 1) / 2) * plotHeight;
+            const yMax = top + (1 - (maximum + 1) / 2) * plotHeight;
+            ctx.beginPath(); ctx.moveTo(x, yMin); ctx.lineTo(x, yMax); ctx.stroke();
         });
-        ctx.stroke();
+    }
+
+    function invalidateRealtime(reason) {
+        const alreadyInvalid = realtimeInvalidated;
+        realtimeInvalidated = true;
+        if (!alreadyInvalid) {
+            const unavailable = {available: false, device_available: false, stale: true, analysis: null};
+            updatePose(unavailable, {pose_fps: 0});
+            updateFace(unavailable, {face_fps: 0});
+            updateAudio(unavailable);
+            drawWaveform({available: false, duration_seconds: 0, envelope: []});
+            byId("camera-fps").textContent = "--";
+        }
+        window.LightingControls.setConnected(false);
+        setConnection(false, reason, false);
     }
 
     function updateHistory(history) {
@@ -207,6 +270,7 @@
 
     function updateDashboard(data) {
         lastMessageAt = Date.now();
+        realtimeInvalidated = false;
         setConnection(true, data.system?.status === "degraded" ? "服务降级" : "已连接");
         const performance = data.system?.performance || {};
         byId("host-cpu").textContent = `${fmt(performance.host_cpu_percent)}%`;
@@ -237,13 +301,13 @@
     function connect() {
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";
         socket = new WebSocket(`${protocol}//${location.host}/ws/monitor`);
-        socket.addEventListener("open", () => { reconnectDelay = 500; setConnection(true, "已连接"); });
+        socket.addEventListener("open", () => { reconnectDelay = 500; setConnection(true, "已连接，等待数据", false); });
         socket.addEventListener("message", (event) => {
             try { updateDashboard(JSON.parse(event.data)); }
             catch (error) { console.error("Invalid monitor payload", error); }
         });
         socket.addEventListener("close", () => {
-            setConnection(false, "连接已断开");
+            invalidateRealtime("连接已断开");
             window.setTimeout(connect, reconnectDelay);
             reconnectDelay = Math.min(5000, reconnectDelay * 1.7);
         });
@@ -255,7 +319,7 @@
         initChart();
         connect();
         window.setInterval(() => {
-            if (lastMessageAt && Date.now() - lastMessageAt > 2000) setConnection(false, "数据已过期");
+            if (lastMessageAt && Date.now() - lastMessageAt > 2000) invalidateRealtime("数据已过期");
         }, 500);
     });
 })();

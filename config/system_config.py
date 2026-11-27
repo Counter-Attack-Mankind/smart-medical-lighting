@@ -22,6 +22,7 @@ VIDEO_FRAME_TTL_SECONDS = 2.0
 # peak-preserving compressed envelope is transmitted.
 WAVEFORM_SECONDS = 5.0
 WAVEFORM_POINTS = 500
+WAVEFORM_UPDATE_HZ = 10.0
 
 # Runtime and UI state
 HISTORY_LIMIT = 50
