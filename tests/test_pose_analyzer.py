@@ -1,18 +1,11 @@
 
-import sys
 import unittest
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 
-sys.path.insert(
-    0,
-    str(Path(__file__).resolve().parents[1] / "src"),
-)
-
-from pose_analyzer import PoseAnalyzer
+from src.pose.pose_analyzer import PoseAnalyzer
 
 
 def create_result(detected=True):

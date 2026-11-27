@@ -10,8 +10,13 @@ from mediapipe.tasks.python import vision
 
 class PoseDetector:
     def __init__(self):
-        project_root = Path(__file__).resolve().parent.parent
-        model_path = project_root / "models" / "pose_landmarker_lite.task"
+        project_root = Path(__file__).resolve().parents[2]
+        model_path = (
+            project_root
+            / "models"
+            / "pose"
+            / "pose_landmarker_lite.task"
+        )
 
         if not model_path.is_file():
             raise FileNotFoundError(f"Model not found: {model_path}")

@@ -3,10 +3,10 @@ import time
 
 import cv2
 
-from camera import Camera
-from pose_detector import PoseDetector
-from pose_visualizer import draw_dashboard, draw_pose
-from pose_analyzer import PoseAnalyzer
+from src.acquisition.camera import Camera
+from src.pose.pose_analyzer import PoseAnalyzer
+from src.pose.pose_detector import PoseDetector
+from src.pose.pose_visualizer import draw_dashboard, draw_pose
 
 
 def main():

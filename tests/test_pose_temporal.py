@@ -1,15 +1,11 @@
 import json
 import math
-import sys
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from pose_analyzer import PoseAnalyzer, TimedState
+from src.pose.pose_analyzer import PoseAnalyzer, TimedState
 
 
 BASE = np.full((33, 3), (0.5, 0.5, 0.0), dtype=float)
