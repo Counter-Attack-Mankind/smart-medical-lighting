@@ -1,0 +1,48 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment variables
+.env
+.env.*
+
+# Pre-trained model weights
+models/*
+!models/.gitkeep
+*.task
+*.tflite
+*.onnx
+*.pt
+*.pth
+
+# Experimental data and results
+data/
+results/
+logs/
+*.log
+
+# Audio and video recordings
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.mkv
+
+# Local cache
+.cache/
+pip-cache/
+downloads/
+
+# Operating system files
+Thumbs.db
+.DS_Store
