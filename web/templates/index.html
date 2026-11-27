@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN" data-bs-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>智慧医疗照明系统</title>
+    <link rel="stylesheet" href="/static/vendor/tabler/css/tabler.min.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+<div class="page dashboard-page">
+    <header class="navbar navbar-expand-md dashboard-navbar">
+        <div class="container-fluid px-3 px-lg-4">
+            <div class="navbar-brand d-flex flex-column align-items-start py-0">
+                <span class="system-title">智慧医疗照明系统</span>
+                <span class="system-subtitle">Smart Medical Lighting System</span>
+            </div>
+            <div class="ms-auto d-flex align-items-center gap-3 nav-metrics">
+                <span><i id="connection-dot" class="status-dot status-dot-animated bg-secondary"></i><span id="connection-text">正在连接</span></span>
+                <span>主机 CPU <strong id="host-cpu">--</strong></span>
+                <span>主机 RAM <strong id="host-memory">--</strong></span>
+                <time id="system-time">--</time>
+            </div>
+        </div>
+    </header>
+
+    <main class="page-wrapper">
+        <div class="page-body py-3">
+            <div class="container-fluid px-3 px-lg-4">
+                <div id="global-alert" class="alert alert-warning d-none" role="alert"></div>
+
+                <div class="row row-cards g-3 mb-3 summary-row">
+                    <div class="col-6 col-xl-3"><div class="card summary-card"><div class="card-body">
+                        <div class="subheader">综合状态候选</div><div class="summary-value" id="summary-state">待接入</div><div class="text-secondary small" id="summary-hint">融合算法尚未接入</div>
+                    </div></div></div>
+                    <div class="col-6 col-xl-3"><div class="card summary-card"><div class="card-body">
+                        <div class="subheader">当前仿真照度</div><div class="summary-value"><span id="summary-lux">--</span> <small>lux</small></div><div class="text-secondary small">仿真设定值，非物理测量</div>
+                    </div></div></div>
+                    <div class="col-6 col-xl-3"><div class="card summary-card"><div class="card-body">
+                        <div class="subheader">控制模式</div><div class="summary-value" id="summary-mode">--</div><div class="text-secondary small" id="summary-light-reason">--</div>
+                    </div></div></div>
+                    <div class="col-6 col-xl-3"><div class="card summary-card"><div class="card-body">
+                        <div class="subheader">共享摄像头性能</div><div class="summary-value"><span id="camera-fps">--</span> <small>FPS</small></div><div class="text-secondary small">进程 CPU <span id="process-cpu">--</span> / 内存 <span id="process-memory">--</span></div>
+                    </div></div></div>
+                </div>
+
+                <div class="row row-cards g-3 mb-3 perception-row">
+                    <section class="col-12 col-xl-4"><div class="card perception-card h-100">
+                        <div class="card-header compact-header"><h2 class="card-title">人体动作识别</h2><span id="pose-status" class="badge bg-secondary-lt">不可用</span></div>
+                        <div class="video-shell"><img src="/video/pose" alt="人体姿态检测实时画面"></div>
+                        <div class="card-body pt-2">
+                            <div class="metric-grid">
+                                <span>基础姿态<strong id="pose-posture">--</strong></span><span>运动状态<strong id="pose-motion">--</strong></span>
+                                <span>行为候选<strong id="pose-behavior">--</strong></span><span>推理性能<strong><span id="pose-fps">--</span> FPS / <span id="pose-ms">--</span> ms</strong></span>
+                            </div>
+                            <div class="reliability-row"><span>观测可靠性</span><span id="pose-reliability-text">--</span></div><div class="progress progress-sm"><div id="pose-reliability" class="progress-bar bg-blue" style="width:0%"></div></div>
+                        </div>
+                    </div></section>
+
+                    <section class="col-12 col-xl-4"><div class="card perception-card h-100">
+                        <div class="card-header compact-header"><h2 class="card-title">人脸表情识别</h2><span id="face-status" class="badge bg-secondary-lt">不可用</span></div>
+                        <div class="video-shell"><img src="/video/face" alt="人脸关键点检测实时画面"></div>
+                        <div class="card-body pt-2">
+                            <div class="metric-grid">
+                                <span>稳定表情候选<strong id="face-expression">--</strong></span><span>面部活动<strong id="face-activity">--</strong></span>
+                                <span>头姿 Y/P/R<strong id="face-head">--</strong></span><span>推理性能<strong><span id="face-fps">--</span> FPS / <span id="face-ms">--</span> ms</strong></span>
+                            </div>
+                            <div class="reliability-row"><span>观测可靠性</span><span id="face-reliability-text">--</span></div><div class="progress progress-sm"><div id="face-reliability" class="progress-bar bg-cyan" style="width:0%"></div></div>
+                        </div>
+                    </div></section>
+
+                    <section class="col-12 col-xl-4"><div class="card perception-card h-100">
+                        <div class="card-header compact-header"><h2 class="card-title">多模态综合评估</h2><span id="fusion-status" class="badge bg-yellow-lt">待接入</span></div>
+                        <div class="card-body fusion-body">
+                            <div class="russell-wrap"><canvas id="russell-chart"></canvas></div>
+                            <div class="fusion-values"><span>Valence <strong id="fusion-valence">--</strong></span><span>Arousal <strong id="fusion-arousal">--</strong></span><span>候选 <strong id="fusion-candidate">未知</strong></span></div>
+                            <div id="fusion-message" class="text-secondary small mb-2">多模态融合算法待接入</div><div id="fusion-weights" class="weight-list"></div>
+                        </div>
+                    </div></section>
+                </div>
+
+                <div class="row row-cards g-3 mb-3 audio-light-row">
+                    <div class="col-12 col-xl-8 d-flex flex-column gap-3">
+                        <section class="card audio-card">
+                            <div class="card-header compact-header"><h2 class="card-title">语音及声音事件识别</h2><span id="audio-status" class="badge bg-secondary-lt">不可用</span></div>
+                            <div class="card-body py-2"><div class="row g-3 h-100">
+                                <div class="col-12 col-md-7 audio-transcript">
+                                    <div class="d-flex flex-wrap gap-3 small mb-2"><span>语音活动：<strong id="speech-active">--</strong></span><span>ASR 状态：<strong id="speech-state">--</strong></span><span>表达强度：<strong id="speech-intensity">--</strong></span><span>可靠性：<strong id="audio-reliability">--</strong></span><span>采集丢块/溢出/转写队列丢弃：<strong id="audio-loss">--</strong></span></div>
+                                    <div id="transcript-text" class="transcript-text">暂无有效转写</div><div id="transcript-meta" class="text-secondary small">历史转写与当前语音状态分开显示</div>
+                                </div>
+                                <div class="col-12 col-md-5 border-start-md ps-md-3"><div class="subheader mb-2">环境声音事件</div><div id="sound-events" class="sound-events"><span class="text-secondary">当前无超过阈值的白名单事件</span></div></div>
+                            </div></div>
+                        </section>
+                        <section class="card waveform-card">
+                            <div class="card-header compact-header py-2"><h2 class="card-title">实时音频波形</h2><span id="waveform-status" class="text-secondary small">不可用</span></div>
+                            <div class="card-body p-2"><canvas id="waveform-canvas" aria-label="最近五秒音频波形"></canvas></div>
+                        </section>
+                    </div>
+
+                    <section class="col-12 col-xl-4"><div class="card lighting-card h-100">
+                        <div class="card-header compact-header"><h2 class="card-title">虚拟灯光控制</h2><span class="badge bg-blue-lt">仿真</span></div>
+                        <div class="card-body d-flex flex-column">
+                            <div class="bulb-stage">
+                                <svg id="bulb-svg" viewBox="0 0 160 220" role="img" aria-label="虚拟灯泡">
+                                    <defs><filter id="bulb-glow"><feGaussianBlur stdDeviation="10" result="blur"></feGaussianBlur><feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></filter></defs>
+                                    <circle id="bulb-halo" cx="80" cy="76" r="58"></circle><path id="bulb-glass" d="M80 18c-34 0-57 25-57 56 0 24 12 38 27 52 8 7 10 18 10 27h40c0-9 2-20 10-27 15-14 27-28 27-52 0-31-23-56-57-56z"></path><path class="bulb-base" d="M58 158h44v12H58zm4 17h36v12H62zm7 17h22l-5 10H74z"></path>
+                                </svg><div class="bulb-lux"><strong id="lighting-current">--</strong><span>lux</span></div>
+                            </div>
+                            <div class="mb-3"><label class="form-label">控制模式</label><div class="btn-group w-100" role="group"><button id="mode-manual" class="btn btn-outline-primary" type="button">手动</button><button id="mode-automatic" class="btn btn-outline-primary" type="button">自动</button></div></div>
+                            <label for="lux-slider" class="form-label d-flex justify-content-between"><span>目标仿真照度</span><strong><span id="lighting-target">--</span> lux</strong></label>
+                            <input id="lux-slider" class="form-range" type="range" min="0" max="600" step="5" disabled>
+                            <div id="lighting-reason" class="text-secondary small mt-2">等待后端状态</div><div class="text-secondary small mt-1">后端确认状态：<strong id="lighting-status">--</strong></div><div id="lighting-feedback" class="small mt-2" aria-live="polite"></div>
+                            <div class="mt-auto pt-3 text-secondary small">仿真设定值不代表实际物理照度或临床照明处方；自动策略将在后续阶段接入。</div>
+                        </div>
+                    </div></section>
+                </div>
+
+                <section class="card history-card mb-3">
+                    <div class="card-header compact-header"><h2 class="card-title">状态历史与调节记录</h2><span class="text-secondary small">最近50条真实事件</span></div>
+                    <div class="table-responsive history-scroll"><table class="table table-vcenter card-table mb-0"><thead><tr><th>时间</th><th>事件</th><th class="text-end">目标照度</th></tr></thead><tbody id="history-body"><tr><td colspan="3" class="text-center text-secondary">暂无记录</td></tr></tbody></table></div>
+                </section>
+            </div>
+        </div>
+    </main>
+</div>
+
+<script src="/static/vendor/tabler/js/tabler.min.js"></script>
+<script src="/static/vendor/charts/chart.umd.min.js"></script>
+<script src="/static/js/lighting.js"></script>
+<script src="/static/js/dashboard.js"></script>
+</body>
+</html>

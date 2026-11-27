@@ -1,4 +1,5 @@
 import json
+import threading
 import unittest
 
 import numpy as np
@@ -113,6 +114,38 @@ class FakeYamnet:
 
     def close(self):
         pass
+
+
+class FakeMicrophone:
+    def __init__(self, block_count=3):
+        duration = cfg.BLOCK_SIZE / cfg.SAMPLE_RATE
+        self.blocks = [
+            (np.zeros(cfg.BLOCK_SIZE, dtype=np.float32), index * duration)
+            for index in range(block_count)
+        ]
+
+    def read(self, timeout=None):
+        return self.blocks.pop(0) if self.blocks else (None, None)
+
+    def status(self):
+        return {"queued_blocks": len(self.blocks), "dropped_blocks": 0, "input_overflows": 0}
+
+    def release(self):
+        pass
+
+
+class BlockingFakeAsr(WorkingFakeAsr):
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+
+    def recognize(self, samples):
+        self.started.set()
+        self.release.wait(1.0)
+        result = super().recognize(samples)
+        self.finished.set()
+        return result
 
 
 class TestAudioAnalyzer(unittest.TestCase):
@@ -242,6 +275,32 @@ class TestAudioAnalyzer(unittest.TestCase):
         self.assertEqual(second["speech_state"], "transcribed")
         self.assertEqual(second["transcriptions"][0]["text"], "测试")
         detector.close()
+
+    def test_detector_read_keeps_processing_while_asr_runs(self):
+        asr = BlockingFakeAsr()
+        detector = AudioDetector(
+            microphone=FakeMicrophone(),
+            vad_detector=SegmentVad(),
+            asr_detector=asr,
+            yamnet_detector=FakeYamnet(),
+            start_microphone=False,
+        )
+        try:
+            first = detector.read()
+            self.assertTrue(first["processing"])
+            self.assertTrue(asr.started.wait(0.5))
+
+            second = detector.read()
+            self.assertTrue(second["processing"])
+            self.assertFalse(second["transcriptions"])
+
+            asr.release.set()
+            self.assertTrue(asr.finished.wait(0.5))
+            third = detector.read()
+            self.assertEqual(third["transcriptions"][0]["text"], "测试")
+        finally:
+            asr.release.set()
+            detector.close()
 
     def test_strict_json_output(self):
         analyzer = AudioAnalyzer()

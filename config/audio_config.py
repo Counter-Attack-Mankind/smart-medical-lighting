@@ -34,6 +34,7 @@ VAD_NUM_THREADS = 1
 ASR_NUM_THREADS = 2
 ASR_LANGUAGE = "zh"
 ASR_USE_ITN = True
+ASR_PENDING_SEGMENTS_MAX = 4
 TRANSCRIPTION_TTL_SECONDS = 15.0
 
 # YAMNet. The model consumes 975 ms windows every 500 ms.
@@ -65,6 +66,17 @@ YAMNET_EVENT_THRESHOLDS = {
     "Fire alarm": 0.30, "Glass": 0.30, "Shatter": 0.30,
     "Thump, thud": 0.30, "Bang": 0.30, "Slap, smack": 0.30,
     "Smash, crash": 0.30, "Breaking": 0.30, "Silence": 0.50,
+}
+YAMNET_EVENT_LABELS_ZH = {
+    "Speech": "说话声", "Whispering": "耳语", "Shout": "喊叫",
+    "Yell": "大喊", "Children shouting": "儿童喊叫", "Screaming": "尖叫",
+    "Crying, sobbing": "哭泣/抽泣", "Laughter": "笑声", "Sigh": "叹气",
+    "Cough": "咳嗽", "Clapping": "拍手", "Slam": "猛关/撞击",
+    "Knock": "敲击", "Tap": "轻敲", "Alarm": "警报",
+    "Alarm clock": "闹钟", "Smoke detector, smoke alarm": "烟雾报警器",
+    "Fire alarm": "火警", "Glass": "玻璃声", "Shatter": "碎裂声",
+    "Thump, thud": "沉闷撞击", "Bang": "砰响", "Slap, smack": "拍打声",
+    "Smash, crash": "猛烈撞击", "Breaking": "物品破裂", "Silence": "安静",
 }
 
 # Acoustic and prosodic analysis

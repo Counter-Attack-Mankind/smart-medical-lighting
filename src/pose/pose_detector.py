@@ -36,7 +36,7 @@ class PoseDetector:
         self.start_time = time.perf_counter()
         self.last_timestamp_ms = -1
 
-    def detect(self, frame):
+    def detect(self, frame, timestamp_ms=None):
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb_frame = rgb_frame.copy()
 
@@ -45,12 +45,19 @@ class PoseDetector:
             data=rgb_frame
         )
 
-        timestamp_ms = int(
-            (time.perf_counter() - self.start_time) * 1000
-        )
-        timestamp_ms = max(
-            timestamp_ms, self.last_timestamp_ms + 1
-        )
+        if timestamp_ms is None:
+            timestamp_ms = int(
+                (time.perf_counter() - self.start_time) * 1000
+            )
+            timestamp_ms = max(
+                timestamp_ms, self.last_timestamp_ms + 1
+            )
+        else:
+            timestamp_ms = int(timestamp_ms)
+            if timestamp_ms <= self.last_timestamp_ms:
+                raise ValueError(
+                    "Frame timestamps must be strictly increasing."
+                )
         self.last_timestamp_ms = timestamp_ms
 
         result = self.detector.detect_for_video(

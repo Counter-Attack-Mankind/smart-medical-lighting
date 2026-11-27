@@ -1,6 +1,7 @@
 """Synchronous VAD, ASR and environmental sound detector orchestration."""
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import mediapipe as mp
 import numpy as np
@@ -160,7 +161,13 @@ class YAMNetDetector:
                     continue
                 threshold = cfg.YAMNET_EVENT_THRESHOLDS[expected_label]
                 if event["score"] >= threshold:
-                    selected.append({**event, "threshold": float(threshold)})
+                    selected.append({
+                        **event,
+                        "display_name": cfg.YAMNET_EVENT_LABELS_ZH.get(
+                            expected_label, expected_label
+                        ),
+                        "threshold": float(threshold),
+                    })
             selected.sort(key=lambda event: event["score"], reverse=True)
             results.append({
                 "start_time": float(start_time),
@@ -217,6 +224,11 @@ class AudioDetector:
         self.reset_count = 0
         self.stream_available = False
         self.pending_segments = []
+        self.asr_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="sensevoice-asr"
+        )
+        self.asr_future = None
+        self.dropped_asr_segments = 0
         self.closed = False
 
     def _buffer_status(self):
@@ -245,17 +257,26 @@ class AudioDetector:
     def read(self, timeout=cfg.READ_TIMEOUT_SECONDS):
         if self.microphone is None:
             raise RuntimeError("AudioDetector has no microphone")
+        completed = self._poll_async_asr()
         samples, timestamp = self.microphone.read(timeout=timeout)
         status = self._buffer_status()
+        status["dropped_asr_segments"] = int(self.dropped_asr_segments)
         if samples is None:
-            completed = self._recognize_pending()
             if self.stream_available:
                 self._reset_stream()
             return self._unavailable_result(
                 time.perf_counter(), status, "read_timeout", completed
             )
-        completed = self._recognize_pending()
-        return self.process_block(samples, timestamp, status, completed)
+        result = self.process_block(samples, timestamp, status, completed)
+        self._schedule_async_asr()
+        result["buffer_status"]["dropped_asr_segments"] = int(
+            self.dropped_asr_segments
+        )
+        processing = bool(self.asr_future is not None or self.pending_segments)
+        result["processing"] = processing
+        if processing and not result["transcriptions"]:
+            result["speech_state"] = "processing"
+        return result
 
     def _unavailable_result(self, timestamp, status, reason, transcriptions=None):
         return {
@@ -293,6 +314,32 @@ class AudioDetector:
             completed.append(recognition)
         return completed
 
+    def _recognize_segment(self, segment):
+        recognition = self.asr_detector.recognize(segment["samples"])
+        recognition.update({
+            "start_time": float(segment["start_time"]),
+            "end_time": float(segment["end_time"]),
+            "duration": float(segment["duration"]),
+            "observed_time": float(segment["end_time"]),
+            "produced_time": float(time.perf_counter()),
+        })
+        return recognition
+
+    def _schedule_async_asr(self):
+        if self.asr_future is None and self.pending_segments:
+            segment = self.pending_segments.pop(0)
+            self.asr_future = self.asr_executor.submit(
+                self._recognize_segment, segment
+            )
+
+    def _poll_async_asr(self):
+        completed = []
+        if self.asr_future is not None and self.asr_future.done():
+            completed.append(self.asr_future.result())
+            self.asr_future = None
+        self._schedule_async_asr()
+        return completed
+
     def process_block(
         self, samples, timestamp, buffer_status=None,
         completed_transcriptions=None,
@@ -328,7 +375,10 @@ class AudioDetector:
         )
         segment_metadata = []
         for segment in segments:
-            self.pending_segments.append(segment)
+            if len(self.pending_segments) < cfg.ASR_PENDING_SEGMENTS_MAX:
+                self.pending_segments.append(segment)
+            else:
+                self.dropped_asr_segments += 1
             segment_metadata.append({
                 "start_time": float(segment["start_time"]),
                 "end_time": float(segment["end_time"]),
@@ -380,6 +430,7 @@ class AudioDetector:
     def close(self):
         if self.closed:
             return
+        self.asr_executor.shutdown(wait=True, cancel_futures=True)
         if hasattr(self.yamnet_detector, "close"):
             self.yamnet_detector.close()
         if self.microphone is not None:
