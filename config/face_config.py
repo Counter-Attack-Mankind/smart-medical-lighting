@@ -24,6 +24,23 @@ MIN_TRACKING_CONFIDENCE = 0.5
 OUTPUT_FACE_BLENDSHAPES = True
 OUTPUT_FACIAL_TRANSFORMATION_MATRIXES = True
 
+# Pose-guided head ROI. The ROI is used only when it belongs to the exact same
+# captured frame; otherwise Face Landmarker falls back to the full image.
+POSE_HEAD_ROI_ENABLED = True
+POSE_HEAD_ROI_WAIT_SECONDS = 0.045
+POSE_HEAD_ROI_CACHE_SIZE = 16
+POSE_HEAD_VISIBILITY_MIN = 0.45
+POSE_HEAD_PRESENCE_MIN = 0.45
+POSE_HEAD_MIN_VALID_POINTS = 3
+POSE_HEAD_MIN_SIZE_PX = 72
+POSE_HEAD_FACE_SPAN_SCALE = 2.4
+POSE_HEAD_SHOULDER_SCALE = 0.78
+POSE_HEAD_HEIGHT_TO_WIDTH = 1.20
+POSE_HEAD_EXPANSION = 1.22
+POSE_HEAD_CENTER_Y_OFFSET = 0.08
+POSE_HEAD_ROI_MIN_RELIABILITY = 0.50
+POSE_HEAD_ROI_RELIABILITY_WEIGHT = 0.20
+
 
 # Expected model outputs
 NUM_LANDMARKS = 478
@@ -128,6 +145,32 @@ EXPRESSION_CONFLICTS = {
     "angry": {"mouth_smile": 0.25, "eye_wide": 0.10},
     "surprised": {"eye_blink": 0.20, "eye_squint": 0.15},
 }
+
+# Sadness has two explainable paths. A mild path combines inner-brow lift with
+# another mouth/brow cue. A crying-like path accepts inner-brow lift or strong
+# brow tension, then requires eye/lower-face support; mouthFrown is supportive
+# but is not mandatory. These are appearance rules, not an inference of emotion.
+SAD_MILD_BROW_INNER_MIN = 0.08
+SAD_MILD_SUPPORT_MIN = 0.08
+CRY_BROW_INNER_MIN = 0.10
+CRY_BROW_DOWN_MIN = 0.22
+CRY_EYE_CLOSURE_MIN = 0.16
+CRY_EYE_SQUINT_MIN = 0.10
+CRY_MOUTH_DISTRESS_MIN = 0.10
+CRY_REQUIRED_COMPONENTS = 3
+CRY_SCORE_WEIGHTS = {
+    "brow_inner_up": 0.24,
+    "brow_down": 0.18,
+    "eye_blink": 0.16,
+    "eye_squint": 0.10,
+    "mouth_lower_down": 0.12,
+    "jaw_open": 0.10,
+    "mouth_frown": 0.06,
+    "mouth_press": 0.04,
+}
+CRY_SAD_SCORE_GAIN = 1.18
+CRY_HAPPY_SUPPRESSION = 0.82
+CRY_SUPPRESSION_FULL_SCALE = 0.42
 EXPRESSION_MIN_SCORE = {
     "happy": 0.32,
     "sad": 0.22,
@@ -160,6 +203,8 @@ NEUTRAL_EXIT_SCORE = 0.62
 # from being mapped directly to an expression candidate.
 HAPPY_SMILE_MIN = 0.25
 HAPPY_SUPPORT_MIN = 0.08
+# Legacy names remain for calibration notes; sadness gating now uses the two
+# paths above instead of requiring mouthFrown.
 SAD_FROWN_MIN = 0.12
 SAD_SUPPORT_MIN = 0.08
 ANGRY_BROW_MIN = 0.14

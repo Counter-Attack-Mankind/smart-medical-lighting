@@ -13,6 +13,7 @@ import psutil
 
 from config import audio_config as audio_cfg
 from config import fusion_config as fusion_cfg
+from config import face_config as face_cfg
 from config import lighting_config as lighting_cfg
 from config import pose_config as pose_cfg
 from config import system_config as cfg
@@ -80,6 +81,8 @@ class PerceptionSystem:
         self.lock = threading.RLock()
         self.analysis_lock = threading.Lock()
         self.frame_condition = threading.Condition(threading.Lock())
+        self.head_roi_condition = threading.Condition(threading.Lock())
+        self.head_roi_cache = {}
         self.stop_event = threading.Event()
         self.threads = []
         self.running = False
@@ -385,6 +388,100 @@ class PerceptionSystem:
         value = int((captured_at - self.start_time) * 1000.0)
         return max(value, detector.last_timestamp_ms + 1)
 
+    @staticmethod
+    def _pose_head_roi(result, frame_shape, sequence, captured_at):
+        if not face_cfg.POSE_HEAD_ROI_ENABLED or not result.pose_landmarks:
+            return None
+        height, width = frame_shape[:2]
+        landmarks = result.pose_landmarks[0]
+        if len(landmarks) < 13:
+            return None
+        head_indices = tuple(range(11))
+
+        def valid(index):
+            point = landmarks[index]
+            return (
+                point.visibility >= face_cfg.POSE_HEAD_VISIBILITY_MIN
+                and point.presence >= face_cfg.POSE_HEAD_PRESENCE_MIN
+                and np.isfinite((point.x, point.y)).all()
+                and 0.0 <= point.x <= 1.0 and 0.0 <= point.y <= 1.0
+            )
+
+        valid_head = [index for index in head_indices if valid(index)]
+        if len(valid_head) < face_cfg.POSE_HEAD_MIN_VALID_POINTS or 0 not in valid_head:
+            return None
+        points = np.asarray(
+            [(landmarks[index].x * width, landmarks[index].y * height) for index in valid_head],
+            dtype=float,
+        )
+        center = np.median(points, axis=0)
+        span_x = float(np.ptp(points[:, 0])) if len(points) > 1 else 0.0
+        span_y = float(np.ptp(points[:, 1])) if len(points) > 1 else 0.0
+        shoulders_valid = valid(11) and valid(12)
+        shoulder_width = 0.0
+        if shoulders_valid:
+            shoulder_width = float(np.linalg.norm(np.asarray(
+                [(landmarks[11].x - landmarks[12].x) * width,
+                 (landmarks[11].y - landmarks[12].y) * height]
+            )))
+        roi_width = max(
+            face_cfg.POSE_HEAD_MIN_SIZE_PX,
+            span_x * face_cfg.POSE_HEAD_FACE_SPAN_SCALE,
+            span_y * face_cfg.POSE_HEAD_FACE_SPAN_SCALE,
+            shoulder_width * face_cfg.POSE_HEAD_SHOULDER_SCALE,
+        ) * face_cfg.POSE_HEAD_EXPANSION
+        roi_height = max(
+            roi_width * face_cfg.POSE_HEAD_HEIGHT_TO_WIDTH,
+            span_y * face_cfg.POSE_HEAD_FACE_SPAN_SCALE,
+        )
+        center[1] += face_cfg.POSE_HEAD_CENTER_Y_OFFSET * roi_height
+        x1 = max(0, int(round(center[0] - roi_width / 2)))
+        y1 = max(0, int(round(center[1] - roi_height / 2)))
+        x2 = min(width, int(round(center[0] + roi_width / 2)))
+        y2 = min(height, int(round(center[1] + roi_height / 2)))
+        if x2 - x1 < face_cfg.POSE_HEAD_MIN_SIZE_PX or y2 - y1 < face_cfg.POSE_HEAD_MIN_SIZE_PX:
+            return None
+        confidence = float(np.mean([
+            min(landmarks[index].visibility, landmarks[index].presence)
+            for index in valid_head
+        ]))
+        coverage = len(valid_head) / len(head_indices)
+        reliability = float(np.clip(
+            0.70 * confidence + 0.20 * coverage + 0.10 * float(shoulders_valid),
+            0.0, 1.0,
+        ))
+        if reliability < face_cfg.POSE_HEAD_ROI_MIN_RELIABILITY:
+            return None
+        return {
+            "source": "pose_head_roi",
+            "sequence": int(sequence),
+            "captured_at": float(captured_at),
+            "bbox_pixels": [x1, y1, x2, y2],
+            "bbox_normalized": [x1 / width, y1 / height, x2 / width, y2 / height],
+            "original_frame_size": [width, height],
+            "reliability": reliability,
+            "valid_head_points": len(valid_head),
+        }
+
+    def _store_head_roi(self, sequence, roi):
+        with self.head_roi_condition:
+            self.head_roi_cache[int(sequence)] = roi
+            while len(self.head_roi_cache) > face_cfg.POSE_HEAD_ROI_CACHE_SIZE:
+                self.head_roi_cache.pop(min(self.head_roi_cache))
+            self.head_roi_condition.notify_all()
+
+    def _matching_head_roi(self, sequence):
+        if not face_cfg.POSE_HEAD_ROI_ENABLED or self.pose_detector is None:
+            return None
+        deadline = time.perf_counter() + face_cfg.POSE_HEAD_ROI_WAIT_SECONDS
+        with self.head_roi_condition:
+            while sequence not in self.head_roi_cache and not self.stop_event.is_set():
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                self.head_roi_condition.wait(remaining)
+            return copy.deepcopy(self.head_roi_cache.get(sequence))
+
     def _pose_loop(self):
         self._video_loop(
             "pose", cfg.POSE_TARGET_HZ, self.pose_detector,
@@ -412,18 +509,51 @@ class PerceptionSystem:
                 sequence, captured_at, frame = item
                 last_sequence = sequence
                 timestamp_ms = self._video_timestamp_ms(captured_at, detector)
+                detection_frame = frame
+                roi = None
+                if module == "face":
+                    roi = self._matching_head_roi(sequence)
+                    if roi is not None:
+                        x1, y1, x2, y2 = roi["bbox_pixels"]
+                        detection_frame = frame[y1:y2, x1:x2].copy()
+                        roi["normalized_to_original"] = {
+                            "offset_x": x1, "offset_y": y1,
+                            "scale_x": x2 - x1, "scale_y": y2 - y1,
+                        }
                 inference_start = time.perf_counter()
-                result, timestamp_ms = detector.detect(frame, timestamp_ms)
+                result, timestamp_ms = detector.detect(detection_frame, timestamp_ms)
                 inference_ms = (time.perf_counter() - inference_start) * 1000.0
                 with self.analysis_lock:
                     if module == "pose":
+                        self._store_head_roi(
+                            sequence,
+                            self._pose_head_roi(result, frame.shape, sequence, captured_at),
+                        )
                         converted = analyzer.update(result, timestamp_ms, frame.shape)
                         analysis = analyzer.analyze(converted)
                         visual = draw_pose(frame.copy(), result)
                     else:
-                        converted = analyzer.update(result, timestamp_ms, frame.shape)
+                        converted = analyzer.update(result, timestamp_ms, detection_frame.shape)
                         analysis = analyzer.analyze(converted)
-                        visual = draw_face(frame.copy(), converted)
+                        if roi is not None:
+                            face_reliability = analysis["reliability"]["score"]
+                            weight = face_cfg.POSE_HEAD_ROI_RELIABILITY_WEIGHT
+                            combined_reliability = float(
+                                (1.0 - weight) * face_reliability
+                                + weight * roi["reliability"]
+                            )
+                            analysis["reliability"]["score"] = combined_reliability
+                            analysis["reliability"]["reliable"] = bool(
+                                analysis["reliability"]["reliable"]
+                                and combined_reliability >= face_cfg.RELIABILITY_THRESHOLD
+                            )
+                        analysis["detection_input"] = roi or {
+                            "source": "full_frame",
+                            "sequence": int(sequence),
+                            "captured_at": float(captured_at),
+                            "original_frame_size": [frame.shape[1], frame.shape[0]],
+                        }
+                        visual = draw_face(detection_frame.copy(), converted)
                 encoded_ok, encoded = cv2.imencode(
                     ".jpg", visual,
                     [cv2.IMWRITE_JPEG_QUALITY, cfg.JPEG_QUALITY],
@@ -744,6 +874,8 @@ class PerceptionSystem:
         self.owned_media_path = Path(path).resolve() if path and owned else None
         self.records = {"pose": None, "face": None, "audio": None}
         self.latest_frame, self.frame_sequence = None, 0
+        with self.head_roi_condition:
+            self.head_roi_cache.clear()
         self.waveform, self.compressed_waveform = np.empty(0, dtype=np.float32), []
         self.fusion_analyzer.reset()
         self.last_semantic_alert_signature = None
@@ -775,6 +907,8 @@ class PerceptionSystem:
             with self.lock:
                 self.records = {"pose": None, "face": None, "audio": None}
                 self.waveform, self.compressed_waveform = np.empty(0, dtype=np.float32), []
+            with self.head_roi_condition:
+                self.head_roi_cache.clear()
         elif action == "stop":
             self.media_source.stop()
         else:
@@ -789,6 +923,8 @@ class PerceptionSystem:
         self.stop_event.set()
         with self.frame_condition:
             self.frame_condition.notify_all()
+        with self.head_roi_condition:
+            self.head_roi_condition.notify_all()
         deadline = time.perf_counter() + cfg.THREAD_JOIN_TIMEOUT_SECONDS
         for thread in self.threads:
             thread.join(max(0.0, deadline - time.perf_counter()))

@@ -135,6 +135,29 @@ class TestFaceAnalyzer(unittest.TestCase):
                     create_result(blendshapes), 0, self.shape
                 ))
                 self.assertEqual(output["raw_expression"], expected)
+
+    def test_crying_like_competition_suppresses_smile_score(self):
+        crying_like = {
+            "mouthSmileLeft": 0.80, "mouthSmileRight": 0.75,
+            "cheekSquintLeft": 0.45, "cheekSquintRight": 0.42,
+            "eyeSquintLeft": 0.30, "eyeSquintRight": 0.28,
+            "eyeBlinkLeft": 0.60, "eyeBlinkRight": 0.58,
+            "browInnerUp": 0.50,
+            "browDownLeft": 0.42, "browDownRight": 0.40,
+            "mouthLowerDownLeft": 0.50, "mouthLowerDownRight": 0.46,
+            "jawOpen": 0.40,
+        }
+        analyzer = FaceAnalyzer()
+        output = analyzer.analyze(analyzer.update(
+            create_result(crying_like), 0, self.shape
+        ))
+        self.assertEqual(output["raw_expression"], "sad")
+        self.assertEqual(output["expression_debug"]["sadness_pattern"], "crying_like")
+        self.assertGreater(output["expression_debug"]["happy_suppression"], 0.5)
+        self.assertGreater(
+            output["pre_gate_expression_scores"]["happy"],
+            output["expression_scores"]["happy"],
+        )
     def test_actual_time_confirmation_and_blink(self):
         analyzer = FaceAnalyzer()
         outputs = []

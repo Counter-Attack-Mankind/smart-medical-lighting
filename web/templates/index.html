@@ -57,7 +57,7 @@
                         <div class="subheader">控制模式</div><div class="summary-value" id="summary-mode">--</div><div class="text-secondary small" id="summary-light-reason">--</div>
                     </div></div></div>
                     <div class="col-6 col-xl-3"><div class="card summary-card"><div class="card-body">
-                        <div class="subheader">共享摄像头性能</div><div class="summary-value"><span id="camera-fps">--</span> <small>FPS</small></div><div class="text-secondary small">进程 CPU <span id="process-cpu">--</span> / 内存 <span id="process-memory">--</span></div>
+                        <div class="subheader" id="camera-performance-label">共享摄像头性能</div><div class="summary-value"><span id="camera-fps">--</span> <small id="camera-fps-unit">FPS</small></div><div class="text-secondary small">进程 CPU <span id="process-cpu">--</span> / 内存 <span id="process-memory">--</span></div>
                     </div></div></div>
                 </div>
 
@@ -67,8 +67,8 @@
                         <div class="video-shell"><img src="/video/pose" alt="人体姿态检测实时画面"></div>
                         <div class="card-body pt-2">
                             <div class="metric-grid">
-                                <span>基础姿态<strong id="pose-posture">--</strong></span><span>运动状态<strong id="pose-motion">--</strong></span>
-                                <span>行为候选<strong id="pose-behavior">--</strong></span><span>推理性能<strong><span id="pose-fps">--</span> FPS / <span id="pose-ms">--</span> ms</strong></span>
+                                <span>基础姿态<strong id="pose-posture">--</strong></span><span id="pose-motion-label">运动状态<strong id="pose-motion">--</strong></span>
+                                <span>行为候选<strong id="pose-behavior">--</strong></span><span>推理性能<strong id="pose-performance">--</strong></span>
                             </div>
                             <div class="reliability-row"><span>观测可靠性</span><span id="pose-reliability-text">--</span></div><div class="progress progress-sm"><div id="pose-reliability" class="progress-bar bg-blue" style="width:0%"></div></div>
                             <div class="reliability-row"><span>综合活动评分</span><span id="pose-activity-text">--</span></div><div class="progress progress-sm"><div id="pose-activity" class="progress-bar bg-orange" style="width:0%"></div></div>
@@ -80,9 +80,11 @@
                         <div class="video-shell"><img src="/video/face" alt="人脸关键点检测实时画面"></div>
                         <div class="card-body pt-2">
                             <div class="metric-grid">
-                                <span>稳定表情候选<strong id="face-expression">--</strong></span><span>面部活动<strong id="face-activity">--</strong></span>
-                                <span>头姿 Y/P/R<strong id="face-head">--</strong></span><span>推理性能<strong><span id="face-fps">--</span> FPS / <span id="face-ms">--</span> ms</strong></span>
+                                <span><span id="face-expression-label">稳定表情候选</span><strong id="face-expression">--</strong></span><span>面部活动<strong id="face-activity">--</strong></span>
+                                <span>头姿 Y/P/R<strong id="face-head">--</strong></span><span>推理性能<strong id="face-performance">--</strong></span>
+                                <span>检测区域<strong id="face-input-region">--</strong></span>
                             </div>
+                            <div id="face-expression-debug" class="text-secondary small mt-2">规则竞争调试：--</div>
                             <div class="reliability-row"><span>观测可靠性</span><span id="face-reliability-text">--</span></div><div class="progress progress-sm"><div id="face-reliability" class="progress-bar bg-cyan" style="width:0%"></div></div>
                             <div class="expression-score-list mt-2">
                                 <div><span>开心</span><div class="progress"><div id="face-score-happy" class="progress-bar bg-green" style="width:0%"></div></div><strong id="face-score-happy-text">--</strong></div>

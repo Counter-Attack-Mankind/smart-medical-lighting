@@ -60,35 +60,57 @@
         return Number.isFinite(Number(reliability.overall)) ? Number(reliability.overall) : null;
     }
 
-    function updatePose(module, performance) {
+    function updatePose(module, performance, source) {
+        const staticImage = source?.type === "image";
         setBadge("pose-status", module);
+        if (staticImage && module.available) {
+            byId("pose-status").textContent = "静态分析完成";
+            byId("pose-status").className = "badge bg-blue-lt";
+        }
         const analysis = module.available ? module.analysis : null;
         const personAbsent = module.available && module.target_detected === false;
         byId("pose-posture").textContent = personAbsent ? "未检测到人体" : translated(analysis?.posture);
-        byId("pose-motion").textContent = personAbsent ? "--" : translated(analysis?.motion_state);
+        byId("pose-motion").textContent = staticImage ? "不适用" : (personAbsent ? "--" : translated(analysis?.motion_state));
         const behaviors = analysis?.behaviors || {};
         const active = Object.entries(behaviors).filter(([, value]) => value === true).map(([name]) => translated(name));
-        byId("pose-behavior").textContent = active.length ? active.join("、") : (analysis ? "未检测到" : "--");
-        byId("pose-fps").textContent = fmt(performance.pose_fps);
-        byId("pose-ms").textContent = fmt(module.inference_ms);
+        byId("pose-behavior").textContent = staticImage ? "不适用" : (active.length ? active.join("、") : (analysis ? "未检测到" : "--"));
+        byId("pose-performance").textContent = staticImage && module.inference_ms !== null && module.inference_ms !== undefined
+            ? `${fmt(module.inference_ms)} ms（单次）`
+            : `${fmt(performance.pose_fps)} FPS / ${fmt(module.inference_ms)} ms`;
         setProgress("pose-reliability", "pose-reliability-text", poseReliability(analysis?.reliability));
-        setProgress("pose-activity", "pose-activity-text", analysis?.activity_score);
+        setProgress("pose-activity", "pose-activity-text", staticImage ? null : analysis?.activity_score);
+        if (staticImage) byId("pose-activity-text").textContent = "不适用";
     }
 
-    function updateFace(module, performance) {
+    function updateFace(module, performance, source) {
+        const staticImage = source?.type === "image";
         setBadge("face-status", module);
+        if (staticImage && module.available) {
+            byId("face-status").textContent = "静态分析完成";
+            byId("face-status").className = "badge bg-blue-lt";
+        }
         const analysis = module.available ? module.analysis : null;
         const faceAbsent = module.available && module.target_detected === false;
-        byId("face-expression").textContent = faceAbsent ? "未检测到人脸" : translated(analysis?.stable_expression);
-        byId("face-activity").textContent = fmt(analysis?.face_activity_score, 2);
+        byId("face-expression-label").textContent = staticImage ? "瞬时表情候选" : "稳定表情候选";
+        byId("face-expression").textContent = faceAbsent ? "未检测到人脸" : translated(staticImage ? analysis?.raw_expression : analysis?.stable_expression);
+        byId("face-activity").textContent = staticImage ? "不适用" : fmt(analysis?.face_activity_score, 2);
         const head = analysis?.head_pose;
         byId("face-head").textContent = head ? `${fmt(head.yaw)}° / ${fmt(head.pitch)}° / ${fmt(head.roll)}°` : "--";
-        byId("face-fps").textContent = fmt(performance.face_fps);
-        byId("face-ms").textContent = fmt(module.inference_ms);
+        byId("face-performance").textContent = staticImage && module.inference_ms !== null && module.inference_ms !== undefined
+            ? `${fmt(module.inference_ms)} ms（单次）`
+            : `${fmt(performance.face_fps)} FPS / ${fmt(module.inference_ms)} ms`;
+        const input = analysis?.detection_input;
+        byId("face-input-region").textContent = input?.source === "pose_head_roi"
+            ? `Pose头部ROI ${(clamp01(input.reliability) * 100).toFixed(0)}%`
+            : (analysis ? "全图回退" : "--");
         setProgress("face-reliability", "face-reliability-text", analysis?.reliability?.score);
         ["happy", "sad", "angry", "surprised", "neutral"].forEach((name) => {
             setProgress(`face-score-${name}`, `face-score-${name}-text`, analysis?.expression_scores?.[name]);
         });
+        const debug = analysis?.expression_debug;
+        byId("face-expression-debug").textContent = debug
+            ? `规则竞争：${debug.sadness_pattern === "crying_like" ? "哭泣样组合" : (debug.sadness_pattern === "mild_sad" ? "轻度悲伤组合" : "无悲伤组合")}；哭泣样分数 ${fmt(debug.cry_score, 2)}；开心抑制 ${(clamp01(debug.happy_suppression) * 100).toFixed(0)}%`
+            : "规则竞争调试：--";
     }
 
     function eventRows(events) {
@@ -109,7 +131,23 @@
         return node.innerHTML;
     }
 
-    function updateAudio(module, semantic) {
+    function updateAudio(module, semantic, source) {
+        const staticImage = source?.type === "image";
+        if (staticImage) {
+            byId("audio-status").textContent = "图片模式不适用";
+            byId("audio-status").className = "badge bg-secondary-lt";
+            byId("speech-active").textContent = "不适用";
+            byId("speech-state").textContent = "不适用";
+            byId("speech-intensity").textContent = "不适用";
+            byId("audio-reliability").textContent = "不适用";
+            byId("audio-loss").textContent = "不适用";
+            byId("transcript-text").textContent = "静态图片不包含音频时序分析";
+            byId("transcript-meta").textContent = "不适用";
+            byId("sound-events").innerHTML = '<span class="text-secondary">图片模式不适用</span>';
+            byId("semantic-result").textContent = "图片模式不适用";
+            byId("semantic-alert").classList.add("d-none");
+            return;
+        }
         setBadge("audio-status", module);
         const analysis = module.analysis || null;
         byId("speech-active").textContent = analysis?.speech_active === true ? "检测到" : (analysis?.speech_active === false ? "未检测到" : "--");
@@ -235,7 +273,7 @@
         }
     }
 
-    function drawWaveform(waveform) {
+    function drawWaveform(waveform, source) {
         const canvas = byId("waveform-canvas");
         const rect = canvas.getBoundingClientRect();
         const ratio = window.devicePixelRatio || 1;
@@ -247,6 +285,13 @@
         ctx.clearRect(0, 0, width, height);
         const envelope = waveform?.available ? waveform.envelope : [];
         const duration = Number(waveform?.duration_seconds || 0);
+        if (source?.type === "image") {
+            byId("waveform-status").textContent = "图片模式不适用";
+            ctx.fillStyle = "#667382";
+            ctx.font = "14px sans-serif";
+            ctx.fillText("静态图片无音频波形", 12, height / 2);
+            return;
+        }
         byId("waveform-status").textContent = waveform?.available ? `有效窗口 ${duration.toFixed(2)} 秒` : "不可用";
         const left = 36, right = 8, top = 8, bottom = 18;
         const plotWidth = Math.max(1, width - left - right), plotHeight = Math.max(1, height - top - bottom);
@@ -362,17 +407,20 @@
         realtimeInvalidated = false;
         setConnection(true, data.system?.status === "degraded" ? "服务降级" : "已连接");
         const performance = data.system?.performance || {};
+        const source = data.source || {};
         byId("host-cpu").textContent = `${fmt(performance.host_cpu_percent)}%`;
         byId("host-memory").textContent = `${fmt(performance.host_memory_percent)}%`;
         byId("system-time").textContent = data.timestamp ? new Date(data.timestamp).toLocaleTimeString("zh-CN", {hour12: false}) : "--";
-        byId("camera-fps").textContent = fmt(performance.camera_fps);
+        byId("camera-performance-label").textContent = source.type === "image" ? "静态素材分析" : "共享摄像头性能";
+        byId("camera-fps").textContent = source.type === "image" ? "单次" : fmt(performance.camera_fps);
+        byId("camera-fps-unit").textContent = source.type === "image" ? "推理" : "FPS";
         byId("process-cpu").textContent = `${fmt(performance.process_cpu_percent)}%`;
         byId("process-memory").textContent = `${fmt(performance.process_memory_mb)} MB`;
-        updatePose(data.pose || {}, performance);
-        updateFace(data.face || {}, performance);
-        updateAudio(data.audio || {}, data.fusion?.semantic || {});
+        updatePose(data.pose || {}, performance, source);
+        updateFace(data.face || {}, performance, source);
+        updateAudio(data.audio || {}, data.fusion?.semantic || {}, source);
         updateFusion(data.fusion || {});
-        drawWaveform(data.waveform || {});
+        drawWaveform(data.waveform || {}, source);
         window.LightingControls.update(data.lighting);
         byId("summary-state").textContent = translated(data.fusion?.confirmed_state || data.fusion?.state_candidate);
         byId("summary-hint").textContent = fusionMessage(data.fusion?.message);

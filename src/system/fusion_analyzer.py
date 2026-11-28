@@ -32,6 +32,8 @@ class FusionAnalyzer:
         analysis = module.get("analysis") or {}
         reliability = analysis.get("reliability")
         if isinstance(reliability, dict):
+            if reliability.get("reliable") is False:
+                return 0.0
             score = reliability.get("score")
             if score is None:
                 values = [v for v in reliability.values() if isinstance(v, (int, float))]

@@ -435,11 +435,45 @@ class FaceAnalyzer:
         return pairs
 
     @staticmethod
-    def expression_scores(features):
-        required = set(cfg.NEUTRAL_FEATURE_WEIGHTS)
+    def _sadness_evidence(features):
+        mild_support = max(
+            features["mouth_frown"], features["mouth_lower_down"],
+            features["mouth_press"], features["brow_down"],
+        )
+        mild = bool(
+            features["brow_inner_up"] >= cfg.SAD_MILD_BROW_INNER_MIN
+            and mild_support >= cfg.SAD_MILD_SUPPORT_MIN
+        )
+        components = {
+            "inner_brow_lift": features["brow_inner_up"] >= cfg.CRY_BROW_INNER_MIN,
+            "brow_tension": features["brow_down"] >= cfg.CRY_BROW_DOWN_MIN,
+            "eye_closure": (
+                features["eye_blink"] >= cfg.CRY_EYE_CLOSURE_MIN
+                or features["eye_squint"] >= cfg.CRY_EYE_SQUINT_MIN
+            ),
+            "mouth_distress": max(
+                features["mouth_lower_down"], features["jaw_open"],
+                features["mouth_frown"], features["mouth_press"],
+            ) >= cfg.CRY_MOUTH_DISTRESS_MIN,
+        }
+        crying_like = bool(
+            (components["inner_brow_lift"] or components["brow_tension"])
+            and sum(components.values()) >= cfg.CRY_REQUIRED_COMPONENTS
+        )
+        cry_score = float(np.clip(sum(
+            weight * features[name]
+            for name, weight in cfg.CRY_SCORE_WEIGHTS.items()
+        ), 0.0, 1.0))
+        return mild, crying_like, cry_score, components
+
+    @classmethod
+    def evaluate_expression(cls, features):
+        required = set(cfg.NEUTRAL_FEATURE_WEIGHTS) | set(cfg.CRY_SCORE_WEIGHTS)
+        for mapping in (*cfg.EXPRESSION_WEIGHTS.values(), *cfg.EXPRESSION_CONFLICTS.values()):
+            required.update(mapping)
         if any(features.get(name) is None for name in required):
-            return None
-        scores = {}
+            return None, None, None
+        pre_gate = {}
         for expression in ("happy", "sad", "angry", "surprised"):
             positive = sum(
                 weight * features[name]
@@ -449,7 +483,27 @@ class FaceAnalyzer:
                 weight * features[name]
                 for name, weight in cfg.EXPRESSION_CONFLICTS[expression].items()
             )
-            scores[expression] = float(np.clip(positive - conflict, 0.0, 1.0))
+            pre_gate[expression] = float(np.clip(positive - conflict, 0.0, 1.0))
+
+        mild_sad, crying_like, cry_score, cry_components = cls._sadness_evidence(features)
+        pre_gate["sad"] = max(
+            pre_gate["sad"],
+            float(np.clip(cry_score * cfg.CRY_SAD_SCORE_GAIN, 0.0, 1.0)),
+        )
+
+        weighted_activation = sum(
+            weight * features[name]
+            for name, weight in cfg.NEUTRAL_FEATURE_WEIGHTS.items()
+        )
+        maximum_activation = max(features[name] for name in required)
+        pre_gate["neutral"] = float(np.clip(
+            1.0
+            - cfg.NEUTRAL_MAX_ACTION_WEIGHT * maximum_activation
+            - cfg.NEUTRAL_MEAN_ACTION_WEIGHT * weighted_activation,
+            0.0,
+            1.0,
+        ))
+        scores = dict(pre_gate)
 
         if not (
             features["mouth_smile"] >= cfg.HAPPY_SMILE_MIN
@@ -459,11 +513,7 @@ class FaceAnalyzer:
             ) >= cfg.HAPPY_SUPPORT_MIN
         ):
             scores["happy"] = 0.0
-        if not (
-            features["mouth_frown"] >= cfg.SAD_FROWN_MIN
-            and max(features["brow_inner_up"], features["mouth_lower_down"])
-            >= cfg.SAD_SUPPORT_MIN
-        ):
+        if not (mild_sad or crying_like):
             scores["sad"] = 0.0
         if not (
             features["brow_down"] >= cfg.ANGRY_BROW_MIN
@@ -480,19 +530,29 @@ class FaceAnalyzer:
             and features["jaw_open"] >= cfg.SURPRISE_JAW_MIN
         ):
             scores["surprised"] = 0.0
+        happy_before_suppression = scores["happy"]
+        happy_suppression = 0.0
+        if crying_like:
+            happy_suppression = cfg.CRY_HAPPY_SUPPRESSION * min(
+                1.0, cry_score / cfg.CRY_SUPPRESSION_FULL_SCALE
+            )
+            scores["happy"] *= 1.0 - happy_suppression
+        debug = {
+            "sadness_pattern": (
+                "crying_like" if crying_like else ("mild_sad" if mild_sad else None)
+            ),
+            "mild_sad_evidence": mild_sad,
+            "crying_like_evidence": crying_like,
+            "cry_score": cry_score,
+            "cry_components": cry_components,
+            "happy_before_cry_suppression": happy_before_suppression,
+            "happy_suppression": happy_suppression,
+        }
+        return pre_gate, scores, debug
 
-        weighted_activation = sum(
-            weight * features[name]
-            for name, weight in cfg.NEUTRAL_FEATURE_WEIGHTS.items()
-        )
-        maximum_activation = max(features[name] for name in required)
-        scores["neutral"] = float(np.clip(
-            1.0
-            - cfg.NEUTRAL_MAX_ACTION_WEIGHT * maximum_activation
-            - cfg.NEUTRAL_MEAN_ACTION_WEIGHT * weighted_activation,
-            0.0,
-            1.0,
-        ))
+    @classmethod
+    def expression_scores(cls, features):
+        _pre_gate, scores, _debug = cls.evaluate_expression(features)
         return scores
 
     @staticmethod
@@ -553,8 +613,8 @@ class FaceAnalyzer:
 
         raw_features = self.extract_action_features(frame.raw_blendshapes)
         features = self.extract_action_features(frame.smoothed_blendshapes)
-        raw_scores = self.expression_scores(raw_features)
-        scores = self.expression_scores(features)
+        raw_pre_gate, raw_scores, raw_debug = self.evaluate_expression(raw_features)
+        pre_gate, scores, expression_debug = self.evaluate_expression(features)
         raw_candidate = (
             self.select_candidate(raw_scores, raw_features)
             if frame.reliable else "unknown"
@@ -616,6 +676,14 @@ class FaceAnalyzer:
             name: self._json_float(raw_scores[name]) if raw_scores is not None else None
             for name in EXPRESSIONS
         }
+        pre_gate_output = {
+            name: self._json_float(pre_gate[name]) if pre_gate is not None else None
+            for name in EXPRESSIONS
+        }
+        raw_pre_gate_output = {
+            name: self._json_float(raw_pre_gate[name]) if raw_pre_gate is not None else None
+            for name in EXPRESSIONS
+        }
         head_pose = None
         if frame.smoothed_head_pose is not None and frame.face_detected:
             head_pose = {
@@ -638,6 +706,10 @@ class FaceAnalyzer:
             "stable_expression": stable,
             "expression_scores": score_output,
             "raw_expression_scores": raw_score_output,
+            "pre_gate_expression_scores": pre_gate_output,
+            "raw_pre_gate_expression_scores": raw_pre_gate_output,
+            "expression_debug": expression_debug if frame.reliable else None,
+            "raw_expression_debug": raw_debug if frame.reliable else None,
             "blendshapes": coefficients,
             "action_features": {
                 name: self._json_float(value) for name, value in features.items()

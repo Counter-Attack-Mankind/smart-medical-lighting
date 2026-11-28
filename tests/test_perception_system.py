@@ -3,6 +3,7 @@ import json
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -25,6 +26,28 @@ class ClosedResource:
 
 
 class PerceptionSystemTests(unittest.TestCase):
+    def test_pose_head_roi_uses_head_points_and_shoulders(self):
+        points = [SimpleNamespace(
+            x=0.5, y=0.3, visibility=0.95, presence=0.95
+        ) for _ in range(33)]
+        for index, x, y in (
+            (0, .50, .28), (1, .47, .26), (2, .46, .26),
+            (4, .53, .26), (5, .54, .26), (7, .43, .28),
+            (8, .57, .28), (9, .48, .33), (10, .52, .33),
+            (11, .38, .48), (12, .62, .48),
+        ):
+            points[index].x, points[index].y = x, y
+        result = SimpleNamespace(pose_landmarks=[points])
+        roi = PerceptionSystem._pose_head_roi(result, (480, 640, 3), 7, 1.25)
+        self.assertIsNotNone(roi)
+        self.assertEqual(roi["sequence"], 7)
+        self.assertGreaterEqual(roi["reliability"], 0.9)
+        x1, y1, x2, y2 = roi["bbox_pixels"]
+        self.assertLess(x1, 320)
+        self.assertGreater(x2, 320)
+        self.assertLess(y1, 160)
+        self.assertGreater(y2, 160)
+
     def test_waveform_compression_preserves_extrema_and_limit(self):
         samples = np.sin(np.linspace(0.0, 20.0 * np.pi, 4000)).astype(np.float32)
         compressed = PerceptionSystem.compress_waveform(samples, max_points=100)
