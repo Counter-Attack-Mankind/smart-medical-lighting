@@ -29,9 +29,26 @@
             <div class="container-fluid px-3 px-lg-4">
                 <div id="global-alert" class="alert alert-warning d-none" role="alert"></div>
 
+                <section class="card source-bar mb-3">
+                    <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
+                        <strong>&#25968;&#25454;&#28304;</strong>
+                        <button id="source-live" class="btn btn-sm btn-outline-primary" type="button">&#23454;&#26102;&#35774;&#22791;</button>
+                        <label class="btn btn-sm btn-outline-primary mb-0">&#36873;&#25321;&#35270;&#39057;<input id="source-video-file" type="file" accept="video/*" hidden></label>
+                        <label class="btn btn-sm btn-outline-primary mb-0">&#36873;&#25321;&#22270;&#29255;<input id="source-image-file" type="file" accept="image/*" hidden></label>
+                        <span class="vr mx-1"></span>
+                        <button id="source-play" class="btn btn-sm btn-outline-secondary" type="button">&#24320;&#22987;</button>
+                        <button id="source-pause" class="btn btn-sm btn-outline-secondary" type="button">&#26242;&#20572;</button>
+                        <button id="source-replay" class="btn btn-sm btn-outline-secondary" type="button">&#37325;&#26032;&#25773;&#25918;</button>
+                        <button id="source-stop" class="btn btn-sm btn-outline-secondary" type="button">&#20572;&#27490;</button>
+                        <div class="source-progress flex-grow-1"><div class="progress progress-sm"><div id="source-progress-bar" class="progress-bar" style="width:0%"></div></div></div>
+                        <span id="source-status" class="small text-secondary">&#23454;&#26102;&#35774;&#22791;</span>
+                    </div>
+                    <div id="source-feedback" class="source-feedback px-3 pb-2 text-secondary">可选择本地视频或图片；素材模式不会启用摄像头，视频无音轨时不会启用麦克风。</div>
+                </section>
+
                 <div class="row row-cards g-3 mb-3 summary-row">
                     <div class="col-6 col-xl-3"><div class="card summary-card"><div class="card-body">
-                        <div class="subheader">综合状态候选</div><div class="summary-value" id="summary-state">待接入</div><div class="text-secondary small" id="summary-hint">融合算法尚未接入</div>
+                        <div class="subheader">综合状态候选</div><div class="summary-value" id="summary-state">信息不足</div><div class="text-secondary small" id="summary-hint">等待有效观测</div>
                     </div></div></div>
                     <div class="col-6 col-xl-3"><div class="card summary-card"><div class="card-body">
                         <div class="subheader">当前仿真照度</div><div class="summary-value"><span id="summary-lux">--</span> <small>lux</small></div><div class="text-secondary small">仿真设定值，非物理测量</div>
@@ -54,6 +71,7 @@
                                 <span>行为候选<strong id="pose-behavior">--</strong></span><span>推理性能<strong><span id="pose-fps">--</span> FPS / <span id="pose-ms">--</span> ms</strong></span>
                             </div>
                             <div class="reliability-row"><span>观测可靠性</span><span id="pose-reliability-text">--</span></div><div class="progress progress-sm"><div id="pose-reliability" class="progress-bar bg-blue" style="width:0%"></div></div>
+                            <div class="reliability-row"><span>综合活动评分</span><span id="pose-activity-text">--</span></div><div class="progress progress-sm"><div id="pose-activity" class="progress-bar bg-orange" style="width:0%"></div></div>
                         </div>
                     </div></section>
 
@@ -66,15 +84,22 @@
                                 <span>头姿 Y/P/R<strong id="face-head">--</strong></span><span>推理性能<strong><span id="face-fps">--</span> FPS / <span id="face-ms">--</span> ms</strong></span>
                             </div>
                             <div class="reliability-row"><span>观测可靠性</span><span id="face-reliability-text">--</span></div><div class="progress progress-sm"><div id="face-reliability" class="progress-bar bg-cyan" style="width:0%"></div></div>
+                            <div class="expression-score-list mt-2">
+                                <div><span>开心</span><div class="progress"><div id="face-score-happy" class="progress-bar bg-green" style="width:0%"></div></div><strong id="face-score-happy-text">--</strong></div>
+                                <div><span>悲伤</span><div class="progress"><div id="face-score-sad" class="progress-bar bg-blue" style="width:0%"></div></div><strong id="face-score-sad-text">--</strong></div>
+                                <div><span>愤怒</span><div class="progress"><div id="face-score-angry" class="progress-bar bg-red" style="width:0%"></div></div><strong id="face-score-angry-text">--</strong></div>
+                                <div><span>惊讶</span><div class="progress"><div id="face-score-surprised" class="progress-bar bg-yellow" style="width:0%"></div></div><strong id="face-score-surprised-text">--</strong></div>
+                                <div><span>中性</span><div class="progress"><div id="face-score-neutral" class="progress-bar bg-secondary" style="width:0%"></div></div><strong id="face-score-neutral-text">--</strong></div>
+                            </div>
                         </div>
                     </div></section>
 
                     <section class="col-12 col-xl-4"><div class="card perception-card h-100">
-                        <div class="card-header compact-header"><h2 class="card-title">多模态综合评估</h2><span id="fusion-status" class="badge bg-yellow-lt">待接入</span></div>
+                        <div class="card-header compact-header"><h2 class="card-title">多模态综合评估</h2><span id="fusion-status" class="badge bg-yellow-lt">信息不足</span></div>
                         <div class="card-body fusion-body">
                             <div class="russell-wrap"><canvas id="russell-chart"></canvas></div>
                             <div class="fusion-values"><span>Valence <strong id="fusion-valence">--</strong></span><span>Arousal <strong id="fusion-arousal">--</strong></span><span>候选 <strong id="fusion-candidate">未知</strong></span></div>
-                            <div id="fusion-message" class="text-secondary small mb-2">多模态融合算法待接入</div><div id="fusion-weights" class="weight-list"></div>
+                            <div id="fusion-message" class="text-secondary small mb-2">等待有效观测</div><div id="fusion-weights" class="weight-list"></div>
                         </div>
                     </div></section>
                 </div>
@@ -87,6 +112,8 @@
                                 <div class="col-12 col-md-7 audio-transcript">
                                     <div class="d-flex flex-wrap gap-3 small mb-2"><span>语音活动：<strong id="speech-active">--</strong></span><span>ASR 状态：<strong id="speech-state">--</strong></span><span>表达强度：<strong id="speech-intensity">--</strong></span><span>可靠性：<strong id="audio-reliability">--</strong></span><span>采集丢块/溢出/转写队列丢弃：<strong id="audio-loss">--</strong></span></div>
                                     <div id="transcript-text" class="transcript-text">暂无有效转写</div><div id="transcript-meta" class="text-secondary small">历史转写与当前语音状态分开显示</div>
+                                    <div id="semantic-result" class="semantic-result mt-2 text-secondary">当前未匹配语义规则</div>
+                                    <div id="semantic-alert" class="semantic-alert alert alert-danger d-none mt-2 mb-0" role="alert"></div>
                                 </div>
                                 <div class="col-12 col-md-5 border-start-md ps-md-3"><div class="subheader mb-2">环境声音事件</div><div id="sound-events" class="sound-events"><span class="text-secondary">当前无超过阈值的白名单事件</span></div></div>
                             </div></div>
@@ -110,7 +137,7 @@
                             <label for="lux-slider" class="form-label d-flex justify-content-between"><span>目标仿真照度</span><strong><span id="lighting-target">--</span> lux</strong></label>
                             <input id="lux-slider" class="form-range" type="range" min="0" max="600" step="5" disabled>
                             <div id="lighting-reason" class="text-secondary small mt-2">等待后端状态</div><div class="text-secondary small mt-1">后端确认状态：<strong id="lighting-status">--</strong></div><div id="lighting-feedback" class="small mt-2" aria-live="polite"></div>
-                            <div class="mt-auto pt-3 text-secondary small">仿真设定值不代表实际物理照度或临床照明处方；自动策略将在后续阶段接入。</div>
+                            <div class="mt-auto pt-3 text-secondary small">仿真设定值不代表实际物理照度或临床照明处方；自动策略仅用于科研演示。</div>
                         </div>
                     </div></section>
                 </div>

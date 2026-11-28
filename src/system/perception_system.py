@@ -5,12 +5,15 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
 import psutil
 
 from config import audio_config as audio_cfg
+from config import fusion_config as fusion_cfg
+from config import lighting_config as lighting_cfg
 from config import pose_config as pose_cfg
 from config import system_config as cfg
 from src.acquisition.camera import Camera
@@ -22,6 +25,9 @@ from src.face.face_visualizer import draw_face
 from src.pose.pose_analyzer import PoseAnalyzer
 from src.pose.pose_detector import PoseDetector
 from src.pose.pose_visualizer import draw_pose
+from src.system.fusion_analyzer import FusionAnalyzer
+from src.system.lighting_controller import LightingController
+from src.system.media_source import MediaFileSource
 
 
 class RateMeter:
@@ -72,6 +78,7 @@ class PerceptionSystem:
         self.audio_analyzer_factory = audio_analyzer_factory
 
         self.lock = threading.RLock()
+        self.analysis_lock = threading.Lock()
         self.frame_condition = threading.Condition(threading.Lock())
         self.stop_event = threading.Event()
         self.threads = []
@@ -88,6 +95,12 @@ class PerceptionSystem:
         self.pose_analyzer = None
         self.face_analyzer = None
         self.audio_analyzer = None
+        self.media_source = None
+        self.source_spec = {"type": "live", "path": None, "name": "Live camera and microphone"}
+        self.owned_media_path = None
+        self.fusion_analyzer = FusionAnalyzer()
+        self.fusion = self.fusion_analyzer.analyze(None, None, None, time.perf_counter())
+        self.lighting_controller = LightingController()
 
         self.records = {"pose": None, "face": None, "audio": None}
         self.placeholder_jpeg = {
@@ -106,16 +119,9 @@ class PerceptionSystem:
         self.waveform_limit = int(cfg.WAVEFORM_SECONDS * audio_cfg.SAMPLE_RATE)
         self.history = deque(maxlen=cfg.HISTORY_LIMIT)
         self.last_event_key = None
+        self.last_semantic_alert_signature = None
         self.errors = {}
-        self.lighting = {
-            "mode": cfg.DEFAULT_LIGHTING_MODE,
-            "current_lux": cfg.DEFAULT_SIMULATED_LUX,
-            "target_lux": cfg.DEFAULT_SIMULATED_LUX,
-            "reason": "手动仿真初始设定",
-            "status": "confirmed",
-            "updated_at": None,
-            "is_simulated": True,
-        }
+        self.lighting = self.lighting_controller.snapshot()
         self.camera_rate = RateMeter()
         self.pose_rate = RateMeter()
         self.face_rate = RateMeter()
@@ -155,10 +161,10 @@ class PerceptionSystem:
             return None
         return value
 
-    def add_event(self, event_type, message, target_lux=None):
+    def add_event(self, event_type, message, target_lux=None, deduplicate=True):
         key = (event_type, message, target_lux)
         with self.lock:
-            if key == self.last_event_key:
+            if deduplicate and key == self.last_event_key:
                 return False
             now = datetime.now()
             self.history.appendleft({
@@ -189,11 +195,12 @@ class PerceptionSystem:
             self.errors.clear()
 
         try:
-            self.camera = self.camera_factory(
-                camera_id=cfg.CAMERA_ID,
-                width=cfg.CAMERA_WIDTH,
-                height=cfg.CAMERA_HEIGHT,
+            self.camera = (
+                self.camera_factory(camera_id=cfg.CAMERA_ID, width=cfg.CAMERA_WIDTH, height=cfg.CAMERA_HEIGHT)
+                if self.source_spec["type"] == "live"
+                else MediaFileSource(self.source_spec["path"], audio_cfg.SAMPLE_RATE, audio_cfg.BLOCK_SIZE)
             )
+            self.media_source = self.camera if isinstance(self.camera, MediaFileSource) else None
         except Exception as error:
             self._record_error("camera", error)
             self.camera = None
@@ -230,10 +237,21 @@ class PerceptionSystem:
 
         audio_detector = None
         try:
-            audio_detector = self.audio_detector_factory()
+            enable_audio = self.source_spec["type"] == "live" or bool(self.media_source and self.media_source.has_audio)
+            if not enable_audio:
+                raise LookupError("media has no audio track")
+            if self.source_spec["type"] == "live":
+                audio_detector = self.audio_detector_factory()
+            else:
+                try:
+                    audio_detector = self.audio_detector_factory(start_microphone=False)
+                except TypeError:
+                    audio_detector = self.audio_detector_factory()
             audio_analyzer = self.audio_analyzer_factory()
             self.audio_detector = audio_detector
             self.audio_analyzer = audio_analyzer
+        except LookupError:
+            self.audio_detector = self.audio_analyzer = None
         except Exception as error:
             self._record_error("audio", error)
             if audio_detector is not None:
@@ -244,7 +262,7 @@ class PerceptionSystem:
             self.audio_detector = None
             self.audio_analyzer = None
 
-        workers = [("system-monitor", self._monitor_loop)]
+        workers = [("system-monitor", self._monitor_loop), ("fusion-lighting", self._fusion_loop)]
         if self.camera is not None:
             workers.append(("camera-capture", self._camera_loop))
         if self.pose_detector is not None:
@@ -260,7 +278,6 @@ class PerceptionSystem:
         with self.lock:
             self.running = True
             self.status = "running" if workers and not self.errors else "degraded"
-            self.lighting["updated_at"] = datetime.now().isoformat(timespec="seconds")
         for thread in self.threads:
             thread.start()
         self.add_event("system", "统一感知系统已启动")
@@ -270,8 +287,11 @@ class PerceptionSystem:
         next_time = time.perf_counter()
         try:
             while not self.stop_event.is_set():
-                frame = self.camera.read()
-                captured_at = time.perf_counter()
+                item = self.camera.read()
+                if item is None:
+                    self.stop_event.wait(0.005)
+                    continue
+                frame, captured_at = item if isinstance(item, tuple) else (item, time.perf_counter())
                 with self.frame_condition:
                     self.frame_sequence += 1
                     self.latest_frame = (self.frame_sequence, captured_at, frame)
@@ -303,6 +323,46 @@ class PerceptionSystem:
             with self.lock:
                 self.performance = performance
             self.stop_event.wait(1.0)
+
+    def _fusion_loop(self):
+        interval = 1.0 / lighting_cfg.CONTROL_HZ
+        fusion_interval = 1.0 / fusion_cfg.FUSION_HZ
+        next_fusion = 0.0
+        while not self.stop_event.is_set():
+            now = time.perf_counter()
+            with self.lock:
+                if now >= next_fusion:
+                    old_state = self.fusion.get("confirmed_state")
+                    pose = self._module_snapshot("pose", now, cfg.POSE_RESULT_TTL_SECONDS)
+                    face = self._module_snapshot("face", now, cfg.FACE_RESULT_TTL_SECONDS)
+                    audio = self._module_snapshot("audio", now, cfg.AUDIO_RESULT_TTL_SECONDS)
+                    temporal_active = self.source_spec["type"] != "image" and not bool(self.media_source and self.media_source.paused)
+                    self.fusion = self.fusion_analyzer.analyze(pose, face, audio, now, temporal_active)
+                    state_changed = old_state != self.fusion.get("confirmed_state")
+                    alerts = self.fusion.get("semantic", {}).get("alerts", [])
+                    alert_signature = tuple(
+                        (item["category"], tuple(item.get("matched_phrases", ())))
+                        for item in alerts
+                    )
+                    new_alerts = alerts if alert_signature and alert_signature != self.last_semantic_alert_signature else []
+                    self.last_semantic_alert_signature = alert_signature or None
+                    next_fusion = now + fusion_interval
+                else:
+                    state_changed, new_alerts = False, []
+                old_target = self.lighting.get("target_lux")
+                self.lighting = self.lighting_controller.update(self.fusion, now)
+                changed = old_target != self.lighting.get("target_lux")
+                lighting = copy.deepcopy(self.lighting)
+            if changed:
+                self.add_event("lighting_auto", lighting["reason"], lighting["target_lux"])
+            if state_changed:
+                self.add_event("fusion_state", f"confirmed state: {self.fusion['confirmed_state']}")
+            for alert in new_alerts:
+                self.add_event(
+                    "semantic_alert", f"semantic alert: {alert['category']}",
+                    deduplicate=False,
+                )
+            self.stop_event.wait(interval)
 
     def _get_latest_frame(self, last_sequence):
         with self.frame_condition:
@@ -355,14 +415,15 @@ class PerceptionSystem:
                 inference_start = time.perf_counter()
                 result, timestamp_ms = detector.detect(frame, timestamp_ms)
                 inference_ms = (time.perf_counter() - inference_start) * 1000.0
-                if module == "pose":
-                    converted = analyzer.update(result, timestamp_ms, frame.shape)
-                    analysis = analyzer.analyze(converted)
-                    visual = draw_pose(frame.copy(), result)
-                else:
-                    converted = analyzer.update(result, timestamp_ms, frame.shape)
-                    analysis = analyzer.analyze(converted)
-                    visual = draw_face(frame.copy(), converted)
+                with self.analysis_lock:
+                    if module == "pose":
+                        converted = analyzer.update(result, timestamp_ms, frame.shape)
+                        analysis = analyzer.analyze(converted)
+                        visual = draw_pose(frame.copy(), result)
+                    else:
+                        converted = analyzer.update(result, timestamp_ms, frame.shape)
+                        analysis = analyzer.analyze(converted)
+                        visual = draw_face(frame.copy(), converted)
                 encoded_ok, encoded = cv2.imencode(
                     ".jpg", visual,
                     [cv2.IMWRITE_JPEG_QUALITY, cfg.JPEG_QUALITY],
@@ -393,7 +454,17 @@ class PerceptionSystem:
         waveform_interval = 1.0 / cfg.WAVEFORM_UPDATE_HZ
         try:
             while not self.stop_event.is_set():
-                detection = self.audio_detector.read()
+                if self.media_source is None:
+                    detection = self.audio_detector.read()
+                else:
+                    block = self.media_source.read_audio_block()
+                    if block is None:
+                        self.stop_event.wait(0.005)
+                        continue
+                    samples, start_seconds, _end_seconds = block
+                    detection = self.audio_detector.process_external_block(
+                        samples, self.media_source.timeline_origin + start_seconds
+                    )
                 frame = self.audio_analyzer.update(detection)
                 analysis = self.audio_analyzer.analyze(frame)
                 generated_at = time.perf_counter()
@@ -500,6 +571,8 @@ class PerceptionSystem:
             and observation_age <= ttl
             and result_fresh
         )
+        if self.source_spec["type"] == "image":
+            result_fresh = fresh = True
         analysis = record["analysis"]
         data_available = not (
             module == "audio"
@@ -566,24 +639,6 @@ class PerceptionSystem:
             ),
         }
 
-    def _fusion_snapshot(self):
-        weights = copy.deepcopy(cfg.FUSION_BASE_WEIGHTS)
-        return {
-            "available": False,
-            "status": "pending",
-            "message": "多模态融合算法待接入",
-            "valence": None,
-            "arousal": None,
-            "state_candidate": "unknown",
-            "trajectory": [],
-            "base_weights": weights,
-            "effective_weights": {
-                "valence": {name: None for name in weights},
-                "arousal": {name: None for name in weights},
-            },
-            "reliability": None,
-        }
-
     def snapshot(self):
         now = time.perf_counter()
         with self.lock:
@@ -606,6 +661,8 @@ class PerceptionSystem:
             status = self.status
             uptime = now - self.start_time if self.start_time is not None else 0.0
             performance = copy.deepcopy(self.performance)
+            fusion = copy.deepcopy(self.fusion)
+            source = self._source_snapshot()
         data = {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "monotonic_time": float(now),
@@ -627,7 +684,8 @@ class PerceptionSystem:
                 "configured_duration_seconds": cfg.WAVEFORM_SECONDS,
                 "envelope": waveform_values if waveform_available else [],
             },
-            "fusion": self._fusion_snapshot(),
+            "fusion": fusion,
+            "source": source,
             "lighting": lighting,
             "history": history,
         }
@@ -639,50 +697,89 @@ class PerceptionSystem:
         now = time.perf_counter()
         with self.lock:
             item = self.jpeg[module]
-            if now - item["captured_at"] > cfg.VIDEO_FRAME_TTL_SECONDS:
+            if self.source_spec["type"] != "image" and now - item["captured_at"] > cfg.VIDEO_FRAME_TTL_SECONDS:
                 return self.placeholder_jpeg[module], item["version"]
             return item["data"], item["version"]
 
     def set_lighting_mode(self, mode):
-        if mode not in ("manual", "automatic"):
-            raise ValueError("mode must be manual or automatic")
         with self.lock:
-            if self.lighting["mode"] == mode:
-                return copy.deepcopy(self.lighting)
-            self.lighting["mode"] = mode
-            self.lighting["reason"] = (
-                "自动策略待接入，保持当前仿真照度"
-                if mode == "automatic" else "手动仿真控制"
-            )
-            self.lighting["status"] = "pending" if mode == "automatic" else "confirmed"
-            self.lighting["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            target = self.lighting["target_lux"]
-        label = "自动控制模式已启用（策略待接入）" if mode == "automatic" else "手动控制模式已启用"
-        self.add_event("lighting_mode", label, target)
-        return self.lighting_snapshot()
+            self.lighting_controller.set_mode(mode)
+            self.lighting = self.lighting_controller.snapshot()
+            result = copy.deepcopy(self.lighting)
+        self.add_event("lighting_mode", f"lighting mode: {mode}", result["target_lux"])
+        return result
 
     def set_manual_lux(self, value):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError("lux must be numeric")
-        value = int(round(value))
-        if not cfg.MIN_SIMULATED_LUX <= value <= cfg.MAX_SIMULATED_LUX:
-            raise ValueError("lux is outside the allowed range")
         with self.lock:
-            if self.lighting["mode"] != "manual":
-                raise RuntimeError("manual lux requires manual mode")
-            if self.lighting["target_lux"] == value:
-                return copy.deepcopy(self.lighting)
-            self.lighting["target_lux"] = value
-            self.lighting["current_lux"] = value
-            self.lighting["reason"] = "用户手动调整仿真照度"
-            self.lighting["status"] = "confirmed"
-            self.lighting["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        self.add_event("lighting_manual", "手动仿真照度已调整", value)
-        return self.lighting_snapshot()
+            self.lighting_controller.set_manual_lux(value)
+            self.lighting = self.lighting_controller.snapshot()
+            result = copy.deepcopy(self.lighting)
+        self.add_event("lighting_manual", "manual illuminance adjusted", value)
+        return result
 
     def lighting_snapshot(self):
         with self.lock:
             return copy.deepcopy(self.lighting)
+
+    def _source_snapshot(self):
+        if self.media_source is not None:
+            snapshot = self.media_source.snapshot()
+            snapshot["name"] = self.source_spec["name"]
+            return snapshot
+        return {"type": self.source_spec["type"], "name": self.source_spec["name"], "state": "playing" if self.running else "stopped", "position_seconds": None, "duration_seconds": None, "progress": None, "has_audio": self.source_spec["type"] == "live"}
+
+    def select_source(self, source_type, path=None, owned=False, display_name=None):
+        if source_type not in ("live", "video", "image"):
+            raise ValueError("source type must be live, video, or image")
+        if source_type != "live" and not path:
+            raise ValueError("media path is required")
+        self.stop()
+        self.source_spec = {
+            "type": source_type,
+            "path": str(path) if path else None,
+            "name": display_name or (Path(path).name if path else "Live camera and microphone"),
+        }
+        self.owned_media_path = Path(path).resolve() if path and owned else None
+        self.records = {"pose": None, "face": None, "audio": None}
+        self.latest_frame, self.frame_sequence = None, 0
+        self.waveform, self.compressed_waveform = np.empty(0, dtype=np.float32), []
+        self.fusion_analyzer.reset()
+        self.last_semantic_alert_signature = None
+        self.lighting_controller.reset_timebase()
+        self.start()
+        self.add_event("source", f"source switched: {self.source_spec['name']}")
+        return self._source_snapshot()
+
+    def control_source(self, action):
+        if self.media_source is None:
+            raise RuntimeError("playback controls require a media source")
+        if action == "play":
+            self.media_source.play()
+        elif action == "pause":
+            self.media_source.pause()
+        elif action == "replay":
+            self.media_source.replay()
+            self.fusion_analyzer.reset()
+            self.last_semantic_alert_signature = None
+            with self.analysis_lock:
+                if self.pose_analyzer:
+                    self.pose_analyzer.reset()
+                if self.face_analyzer:
+                    self.face_analyzer.reset()
+            if self.audio_analyzer:
+                self.audio_analyzer.reset()
+            if self.audio_detector:
+                self.audio_detector.reset()
+            with self.lock:
+                self.records = {"pose": None, "face": None, "audio": None}
+                self.waveform, self.compressed_waveform = np.empty(0, dtype=np.float32), []
+        elif action == "stop":
+            self.media_source.stop()
+        else:
+            raise ValueError("unknown playback action")
+        return self._source_snapshot()
 
     def stop(self):
         with self.lock:
@@ -716,10 +813,14 @@ class PerceptionSystem:
                     self._record_error("shutdown", error)
         self.threads = []
         self.camera = self.pose_detector = self.face_detector = None
+        self.media_source = None
         self.audio_detector = None
         self.pose_analyzer = self.face_analyzer = self.audio_analyzer = None
         with self.lock:
             self.running = False
             self.status = "stopped"
+        if self.owned_media_path is not None:
+            self.owned_media_path.unlink(missing_ok=True)
+            self.owned_media_path = None
         self.add_event("system", "统一感知系统已停止")
         return True

@@ -27,14 +27,5 @@ WAVEFORM_UPDATE_HZ = 10.0
 # Runtime and UI state
 HISTORY_LIMIT = 50
 THREAD_JOIN_TIMEOUT_SECONDS = 10.0
-DEFAULT_LIGHTING_MODE = "manual"
-DEFAULT_SIMULATED_LUX = 300
 MIN_SIMULATED_LUX = 0
 MAX_SIMULATED_LUX = 600
-
-FUSION_BASE_WEIGHTS = {
-    "pose": 0.35,
-    "face": 0.25,
-    "speech_content": 0.20,
-    "speech_prosody": 0.20,
-}

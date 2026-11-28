@@ -106,6 +106,35 @@ class TestFaceAnalyzer(unittest.TestCase):
         ))
         self.assertEqual(output["raw_expression"], "unknown")
 
+    def test_weak_non_happy_expressions_are_observable(self):
+        cases = {
+            "sad": {
+                "mouthFrownLeft": 0.35, "mouthFrownRight": 0.33,
+                "browInnerUp": 0.30,
+                "mouthLowerDownLeft": 0.15, "mouthLowerDownRight": 0.14,
+            },
+            "angry": {
+                "browDownLeft": 0.42, "browDownRight": 0.40,
+                "eyeSquintLeft": 0.12, "eyeSquintRight": 0.11,
+                "noseSneerLeft": 0.12, "noseSneerRight": 0.11,
+                "mouthPressLeft": 0.10, "mouthPressRight": 0.09,
+                "mouthFrownLeft": 0.08, "mouthFrownRight": 0.07,
+            },
+            "surprised": {
+                "eyeWideLeft": 0.25, "eyeWideRight": 0.24,
+                "browInnerUp": 0.18,
+                "browOuterUpLeft": 0.16, "browOuterUpRight": 0.15,
+                "jawOpen": 0.35,
+                "mouthStretchLeft": 0.10, "mouthStretchRight": 0.09,
+            },
+        }
+        for expected, blendshapes in cases.items():
+            with self.subTest(expression=expected):
+                analyzer = FaceAnalyzer()
+                output = analyzer.analyze(analyzer.update(
+                    create_result(blendshapes), 0, self.shape
+                ))
+                self.assertEqual(output["raw_expression"], expected)
     def test_actual_time_confirmation_and_blink(self):
         analyzer = FaceAnalyzer()
         outputs = []

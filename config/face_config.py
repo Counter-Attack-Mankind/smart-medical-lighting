@@ -66,7 +66,14 @@ BLENDSHAPE_NAMES = (
 WINDOW_SECONDS = 3.0
 EMA_TIME_CONSTANT = 0.12
 MAX_OBSERVATION_GAP = 0.35
-EXPRESSION_CONFIRM_SECONDS = 0.40
+EXPRESSION_CONFIRM_SECONDS = {
+    "happy": 0.40,
+    "sad": 0.25,
+    "angry": 0.25,
+    "surprised": 0.22,
+    "neutral": 0.32,
+    "unknown": 0.25,
+}
 MIN_TEMPORAL_COVERAGE = 0.55
 
 # Reliability
@@ -123,26 +130,43 @@ EXPRESSION_CONFLICTS = {
 }
 EXPRESSION_MIN_SCORE = {
     "happy": 0.32,
-    "sad": 0.30,
-    "angry": 0.30,
-    "surprised": 0.32,
+    "sad": 0.22,
+    "angry": 0.21,
+    "surprised": 0.22,
 }
-EXPRESSION_MIN_MARGIN = 0.04
-EXPRESSION_SWITCH_MARGIN = 0.08
-EXPRESSION_EXIT_SCORE = 0.24
-NEUTRAL_EXIT_SCORE = 0.55
+EXPRESSION_MIN_MARGIN = {
+    "happy": 0.04,
+    "sad": 0.02,
+    "angry": 0.02,
+    "surprised": 0.02,
+}
+EXPRESSION_SWITCH_MARGIN = {
+    "happy": 0.08,
+    "sad": 0.04,
+    "angry": 0.04,
+    "surprised": 0.04,
+    "neutral": 0.05,
+    "unknown": 0.04,
+}
+EXPRESSION_EXIT_SCORE = {
+    "happy": 0.24,
+    "sad": 0.18,
+    "angry": 0.18,
+    "surprised": 0.18,
+}
+NEUTRAL_EXIT_SCORE = 0.62
 
 # Necessary multi-action evidence. These prevent a single mouth/eye action
 # from being mapped directly to an expression candidate.
 HAPPY_SMILE_MIN = 0.25
 HAPPY_SUPPORT_MIN = 0.08
-SAD_FROWN_MIN = 0.18
-SAD_SUPPORT_MIN = 0.14
-ANGRY_BROW_MIN = 0.20
-ANGRY_SUPPORT_MIN = 0.12
-SURPRISE_EYE_WIDE_MIN = 0.20
-SURPRISE_BROW_MIN = 0.15
-SURPRISE_JAW_MIN = 0.18
+SAD_FROWN_MIN = 0.12
+SAD_SUPPORT_MIN = 0.08
+ANGRY_BROW_MIN = 0.14
+ANGRY_SUPPORT_MIN = 0.08
+SURPRISE_EYE_WIDE_MIN = 0.13
+SURPRISE_BROW_MIN = 0.10
+SURPRISE_JAW_MIN = 0.12
 
 # Neutral is inferred from low expressive activation; the model's `_neutral`
 # coefficient is deliberately not used.

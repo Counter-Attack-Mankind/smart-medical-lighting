@@ -291,6 +291,23 @@ class AudioDetector:
             result["speech_state"] = "processing"
         return result
 
+    def process_external_block(self, samples, timestamp):
+        """Process a clocked media block without opening or reading a microphone."""
+        completed = self._poll_async_asr()
+        status = self._buffer_status()
+        status.update({
+            "dropped_asr_segments": int(self.dropped_asr_segments),
+            "asr_failure_count": int(self.asr_failure_count),
+            "last_asr_error": self.last_asr_error,
+        })
+        result = self.process_block(samples, timestamp, status, completed)
+        self._schedule_async_asr()
+        processing = bool(self.asr_future is not None or self.pending_segments)
+        result["processing"] = processing
+        if processing and not result["transcriptions"]:
+            result["speech_state"] = "processing"
+        return result
+
     def _unavailable_result(self, timestamp, status, reason, transcriptions=None):
         return {
             "data_available": False,

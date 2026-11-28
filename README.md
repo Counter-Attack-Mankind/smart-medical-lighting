@@ -1,116 +1,140 @@
-# 智慧医疗照明系统
+# Smart Medical Lighting System
 
-面向精神卫生护理场景的多模态智能照明研究与工程验证原型。系统通过普通摄像头和麦克风采集客观观测，分别进行人体姿态与动作识别、人脸表情候选分析、语音转写、环境声音识别及语音韵律分析，并通过统一运行层在本地 Dashboard 中实时展示。
+Research and engineering prototype for multimodal perception and virtual adaptive lighting in mental-health nursing scenarios. The system observes body motion, facial appearance, speech, prosody, and environmental sounds. Its outputs are engineering candidates, not diagnoses, patient attribution, or clinical lighting prescriptions.
 
-Russell 多模态综合评估和自动灯光控制仍处于后续开发阶段。当前输出仅表示外观、动作和声音的工程观测或候选状态，不用于独立医学诊断、疾病判断或临床决策。
-
-## 系统架构
-
-```mermaid
-flowchart LR
-    C[摄像头] --> P[Pose 人体感知]
-    C --> F[Face 面部感知]
-    M[麦克风] --> A[Audio 语音与声音感知]
-    P --> R[统一感知运行层<br/>PerceptionSystem]
-    F --> R
-    A --> R
-    R --> API[FastAPI<br/>REST / WebSocket / MJPEG]
-    API --> UI[Tabler Dashboard]
-    R -. 后续待开发 .-> FU[Russell 多模态融合]
-    FU -. 后续待开发 .-> L[自动灯光控制]
-```
-
-Pose 和 Face 共享一个摄像头，所有音频功能共享一个麦克风。模型只在服务生命周期内初始化一次，网页客户端读取共享的最新结果和 JPEG 缓存，不会因打开多个页面而重复执行推理。
-
-## 技术选型
-
-| 组件 | 用途 |
-|---|---|
-| MediaPipe Pose Landmarker Lite | 33点人体骨架检测 |
-| MediaPipe Face Landmarker | 478点面部网格、52项 Blendshape 和面部变换矩阵 |
-| NumPy | 姿态、活动、表情、韵律及时序规则分析 |
-| Silero VAD / Sherpa-ONNX | 语音活动检测和语音片段划分 |
-| SenseVoiceSmall INT8 | 非流式语音转写及模型标签输出 |
-| YAMNet | 521类环境声音评分及护理相关白名单筛选 |
-| OpenCV / Pillow | 摄像头处理、关键点绘制和中文可视化 |
-| SoundDevice | 16 kHz Float32 单声道麦克风采集 |
-| FastAPI / Uvicorn / WebSocket | 本地服务、控制接口和实时数据通信 |
-| Tabler 1.7.5 / Chart.js 4.6.2 | 离线 Dashboard 和 Russell 平面绘制 |
-
-Python 包的精确版本见 [`requirements.txt`](requirements.txt)，算法参数分别位于 `config/pose_config.py`、`config/face_config.py`、`config/audio_config.py` 和 `config/system_config.py`。
-
-## 工程目录
+## Architecture
 
 ```text
-smart_medical_lighting/
-├── config/                     # Pose、Face、Audio 及系统运行参数
-├── demos/
-│   ├── pose_demo.py            # 人体感知独立入口
-│   ├── face_demo.py            # 面部感知独立入口
-│   └── audio_demo.py           # 音频感知独立入口
-├── models/                     # 本地预训练模型（默认被 Git 忽略）
-│   ├── pose/
-│   ├── face/
-│   └── audio/
-├── src/
-│   ├── acquisition/            # Camera 和 Microphone 采集
-│   ├── pose/                   # 人体 Detector、Analyzer、Visualizer
-│   ├── face/                   # 面部 Detector、Analyzer、Visualizer
-│   ├── audio/                  # 音频 Detector、Analyzer、Visualizer
-│   └── system/
-│       └── perception_system.py # 共享设备、调度、缓存和生命周期
-├── tests/                      # unittest 数学、时序和运行层测试
-├── web/
-│   ├── app.py                  # FastAPI 入口
-│   ├── templates/index.html    # Dashboard 页面
-│   └── static/                 # 本地 CSS、JavaScript、Tabler、Chart.js
-├── requirements.txt
-└── README.md
+live camera + microphone ----+
+video file (OpenCV/FFmpeg) --+--> Pose / Face / Audio analyzers
+image file (single snapshot)-+              |
+                                            v
+                                 FusionAnalyzer (Russell V/A)
+                                            |
+                                      temporal FSM
+                                            |
+                                 LightingController (virtual)
+                                            |
+                              FastAPI + WebSocket + Dashboard
 ```
 
-## 环境安装与模型准备
+`PerceptionSystem` owns the acquisition sources and initializes each model once per selected source. Browser clients only consume shared cached results. Switching source stops the old workers, clears temporal caches, resets the time base, and starts an isolated source session.
 
-当前开发环境为 Windows 11 和 Python 3.11。以下路径仅为通用示例，不要求安装到特定磁盘：
+## Implemented functions
+
+- MediaPipe Pose Landmarker Lite with posture, motion, walking, pacing, repetitive-motion, and transition rules.
+- MediaPipe Face Landmarker with 478 landmarks, 52 blendshapes, expression candidates, facial activity, and head pose.
+- Silero VAD, SenseVoiceSmall INT8, YAMNet, acoustic/prosodic features, speech state, and freshness/reliability metadata.
+- Live camera/microphone, local video, and local image sources. Images are evaluated once and never replayed to manufacture temporal evidence.
+- Video play, pause, replay, stop, progress, and optional audio-track processing. A video without an audio track does not open the microphone.
+- Reliability- and freshness-weighted Russell valence/arousal fusion with independent dimension weights.
+- Candidate/pending/confirmed finite-state machine and 30-second Russell trajectory.
+- Manual or automatic virtual lighting with explicit speech requests taking priority and a rate-limited illuminance transition.
+- Local Tabler dashboard with shared MJPEG previews, WebSocket metrics, and the latest 50 events.
+
+## Fusion model
+
+Each modality produces an optional score `x[m,d]` for dimension `d` and an observation reliability `r[m]`. Missing scores remain `None`. For each dimension:
+
+```text
+raw_weight[m,d] = base_weight[m] * reliability[m] * freshness[m]
+effective_weight[m,d] = raw_weight[m,d] / sum(raw_weight[:,d])
+fused[d] = sum(effective_weight[m,d] * x[m,d])
+```
+
+Fusion is unknown when the raw effective weight total is below `0.20`. Base weights are Pose 0.35, Face 0.25, speech content 0.20, and speech prosody 0.20. Pose primarily supplies arousal; face supplies valence and arousal; keyword/phrase rules supply speech-content valence and explicit rest/lighting intent; prosody and SenseVoice labels supply auxiliary acoustic evidence. YAMNet remains contextual evidence and does not receive a fifth base weight.
+
+Scores are smoothed by a first-order exponential filter with a 1.0 s time constant. State confirmation is initially 3 s, minimum hold is 5 s, hysteresis is 0.05, and insufficient-information timeout is 3 s. Duplicate caches, paused video, and static images do not advance confirmation time.
+
+All initial mappings and thresholds are experimental parameters in [`config/fusion_config.py`](config/fusion_config.py).
+
+## Virtual lighting model
+
+Confirmed candidate targets are:
+
+| Confirmed state | Target |
+|---|---:|
+| tense / active | 200 lux |
+| pleasant / active | 300 lux |
+| low / negative | 500 lux |
+| calm / relaxed | 150 lux |
+| neutral | 300 lux |
+| explicit rest intent | 100 lux |
+
+Default is 300 lux, allowed range is 0--600 lux, control rate is 10 Hz, and both rise and fall rates are 30 lux/s. Manual mode always has priority. Unknown fusion holds the current target. These values are a visualization policy only; they are not measured physical illuminance or a clinical prescription. Parameters are in [`config/lighting_config.py`](config/lighting_config.py).
+
+## Source analysis
+
+- **Live:** camera and microphone are opened once and shared by all modules.
+- **Video:** OpenCV decodes frames against one playback clock. FFmpeg extracts an optional audio track to 16 kHz mono Float32 for the existing audio pipeline. Install `ffmpeg` on `PATH`, or place the portable executable at `.tools/ffmpeg/bin/ffmpeg.exe`.
+- **Image:** OpenCV decodes one frame. Pose/face static geometry is available, while motion, trajectories, and confirmed temporal state are not synthesized.
+
+Uploaded browser files are written under `.temp/uploads/`, which is Git-ignored. They are not committed. The prototype does not persist raw live audio or microphone video.
+
+### Using local material from the Dashboard
+
+1. Start the Dashboard and use the compact source bar above the four status cards.
+2. Select **video** to upload a local MP4, MOV, MKV, AVI, WebM, or M4V file. Analysis starts automatically after the models and optional audio track are ready. The original file name, playback state, elapsed time, total duration, and progress are displayed. Use play, pause, replay, or stop as needed.
+3. Select **image** to upload a JPG, JPEG, PNG, BMP, or WebP file. The image is analyzed once for valid static Pose/Face features. It does not generate motion, trajectory, or state-confirmation evidence by repeating the same frame.
+4. Select **live devices** to return to the camera and microphone. Video and image modes do not require a camera. Video without an audio track does not open the microphone.
+
+The upload status line reports loading, success, missing audio, FFmpeg failure, and operation errors. Browser uploads use a random temporary server-side name, while the Dashboard retains and displays the original local file name. Temporary copies are removed when the source is replaced or the service stops.
+
+## Stage 05.5.1 sensitivity tuning
+
+The following values are initial engineering adjustments and still require real-camera calibration:
+
+- Face: happy rules remain at a minimum score of `0.32` and a `0.40 s` confirmation time. Sad/angry/surprised minimum scores are `0.22/0.21/0.22`; confirmation times are `0.25/0.25/0.22 s`. Their necessary-action and switch margins were reduced, while multi-action evidence remains mandatory.
+- Pose: the activity window changed from `5.0 s` to `2.5 s`, temporal coverage from `0.55` to `0.45`, motion confirmation from `0.45 s` to `0.25 s`, and high-activity enter/exit values from `1.15/0.90` to `0.78/0.60` body-scales per second. Activity full-scale visualization changed from `2.2` to `1.6`.
+- Dashboard: the Pose card shows normalized activity score. The Face card shows all five independent rule scores; these are not probabilities and do not sum to one.
+
+Chinese semantic rules are grouped in `config/fusion_config.py` as negative emotion, depressive expression, agitation, self-harm/suicide, conflict/threat, positive emotion, rest intent, and lighting requests. Phrase matching includes a small preceding-negation window, explicit exceptions such as `不想活了`, and reported/example context exclusions. The matched phrases are visible in the current speech card for manual tuning.
+
+Self-harm/suicide and threat matches produce an independent **human review** alert. Their rule score is not included in Russell fusion and they do not directly change automatic lighting. History stores only the alert category, never the full sensitive transcript. These rules are recall-oriented prompts, not a diagnosis or emergency assessment system.
+
+## Project layout
+
+```text
+config/                     analyzer, fusion, lighting, and runtime parameters
+demos/                      pose_demo.py, face_demo.py, audio_demo.py
+models/                     local ignored model files
+src/acquisition/            camera and microphone capture
+src/pose/                   pose detector/analyzer/visualizer
+src/face/                   face detector/analyzer/visualizer
+src/audio/                  audio detector/analyzer/visualizer
+src/system/
+  perception_system.py      lifecycle, scheduling, caches, source switching
+  media_source.py           image/video clock and FFmpeg audio extraction
+  fusion_analyzer.py        V/A mapping, dynamic weighting, temporal FSM
+  lighting_controller.py    manual/automatic virtual control
+web/                        FastAPI and offline Tabler dashboard
+tests/                      focused unittest modules
+```
+
+## Setup and run
+
+Windows 11 and Python 3.11 are the current development target.
 
 ```powershell
-git clone https://github.com/Counter-Attack-Mankind/smart-medical-lighting.git
-cd smart-medical-lighting
 py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-需要准备以下与当前配置兼容的模型文件：
+Required model locations are defined in `config/pose_config.py`, `config/face_config.py`, and `config/audio_config.py`. Model weights are intentionally Git-ignored.
 
-```text
-models/pose/pose_landmarker_lite.task
-models/face/face_landmarker.task
-models/audio/silero_vad.onnx
-models/audio/yamnet.tflite
-models/audio/sensevoice/model.int8.onnx
-models/audio/sensevoice/tokens.txt
-```
-
-模型文件体积较大且默认由 `.gitignore` 排除，请从相应模型的官方发布渠道取得，并遵守各自许可证；仓库当前没有统一模型下载脚本。实际路径以三个配置文件中的 `MODEL_PATH` 或模型目录配置为准。
-
-Tabler 和 Chart.js 的已构建发行文件保存在 `web/static/vendor/`，Dashboard 不依赖在线 CDN。需要通过本地代理下载依赖或模型时，可临时设置：
+Start the dashboard with the retained one-click launcher:
 
 ```powershell
-$env:HTTP_PROXY = "http://127.0.0.1:7890"
-$env:HTTPS_PROXY = "http://127.0.0.1:7890"
+.\start_dashboard.bat
 ```
 
-## 快速启动
-
-启动统一 Dashboard：
+or directly:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn web.app:app --host 127.0.0.1 --port 8000
 ```
 
-浏览器访问 <http://127.0.0.1:8000>。默认仅监听本机回环地址。
-
-独立模块仍可分别运行：
+Open <http://127.0.0.1:8000>. Independent demos remain available:
 
 ```powershell
 .\.venv\Scripts\python.exe -m demos.pose_demo
@@ -118,48 +142,12 @@ $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 .\.venv\Scripts\python.exe -m demos.audio_demo
 ```
 
-## Dashboard 功能
-
-顶部四个状态卡片显示综合状态占位、当前仿真照度、控制模式和共享摄像头实际性能。主体保持以下七个模块：
-
-1. 人体动作识别：骨架画面、姿态、运动、行为候选、可靠性和推理性能。
-2. 人脸表情识别：面部网格、表情候选、面部活动、头姿和可靠性。
-3. 多模态综合评估：Russell 平面、权重和后续融合接口；当前不生成虚构评分。
-4. 语音及声音事件识别：当前语音状态、历史转写、SenseVoice 标签和 YAMNet 白名单事件。
-5. 实时音频波形：同一麦克风最近最多5秒的峰值保留包络，不传输完整原始 PCM。
-6. 虚拟灯光控制：手动0～600 lux仿真和模式切换；自动策略尚未接入。
-7. 状态历史与调节记录：最近50条真实系统或控制事件，不保存转写内容。
-
-仿真 lux 仅是后端设定值，不代表实际物理照度或临床照明处方。
-
-## 测试与开发进度
-
-运行全部测试：
+Focused Stage 05.4--05.5 checks:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m unittest tests.test_fusion_lighting -v
 ```
 
-测试数量会随开发变化，应以命令的实际输出为准。
+## Development status and limitations
 
-| 阶段 | 状态 |
-|---|---|
-| Stage 01：Pose Landmarker 部署 | 已完成 |
-| Stage 02：人体姿态、活动及行为分析 | 已完成主要开发 |
-| Stage 03：Face Landmarker 与表情时序分析 | 已完成主要开发 |
-| Stage 04：VAD、ASR、声音事件及韵律分析 | 已完成主要开发 |
-| Stage 05.1：本地 Web 技术验证 | 已完成 |
-| Stage 05.2–05.3：统一运行层与 Dashboard | 已完成 |
-| Stage 05.3.1：稳定性与交互优化 | 已完成 |
-| Stage 05.4：多模态融合 | 未完成 |
-| Stage 05.5：自动灯光控制 | 未完成 |
-| Stage 05.6：ARM64 嵌入式性能评估 | 未完成 |
-
-## 隐私与使用限制
-
-- 系统默认在本地运行并监听 `127.0.0.1`，不要在未配置访问控制时暴露到外部网络。
-- 默认不保存原始音频、视频文件或敏感语音转写历史。
-- 环境声音来自麦克风覆盖范围，不能直接归因于特定患者。
-- MediaPipe、SenseVoice、YAMNet 及规则评分均可能受距离、遮挡、噪声、视角和设备差异影响。
-- 所有输出属于客观观测特征或候选状态，不代表真实内部情绪、精神疾病诊断或攻击风险判断。
-- 使用者应遵守隐私、知情同意、数据保护及医疗设备相关法规。
+Stages 01--05.5 are implemented at prototype level. Stage 05.6 ARM64 profiling remains pending. Fusion weights, keyword lists, thresholds, time constants, and illuminance targets require literature review and real experiments. Camera viewpoint, occlusion, distance, lighting, room acoustics, microphone response, ASR errors, and model-domain mismatch all affect results. FFmpeg-backed video audio and browser/hardware behavior must be verified manually on the target Windows machine.

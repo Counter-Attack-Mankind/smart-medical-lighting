@@ -62,14 +62,16 @@ class ExpressionState:
             exit_score = (
                 cfg.NEUTRAL_EXIT_SCORE
                 if self.state == "neutral"
-                else cfg.EXPRESSION_EXIT_SCORE
+                else cfg.EXPRESSION_EXIT_SCORE[self.state]
             )
             challenger = scores.get(candidate, 0.0) if candidate != "unknown" else 0.0
             if (
                 current_score >= exit_score
                 and (
                     candidate == self.state
-                    or challenger < current_score + cfg.EXPRESSION_SWITCH_MARGIN
+                    or challenger < current_score + cfg.EXPRESSION_SWITCH_MARGIN.get(
+                        candidate, cfg.EXPRESSION_SWITCH_MARGIN["unknown"]
+                    )
                 )
             ):
                 self.candidate = None
@@ -86,7 +88,10 @@ class ExpressionState:
             self.candidate_since = timestamp
             return self.state
 
-        if timestamp - self.candidate_since >= cfg.EXPRESSION_CONFIRM_SECONDS:
+        confirm_seconds = cfg.EXPRESSION_CONFIRM_SECONDS.get(
+            candidate, cfg.EXPRESSION_CONFIRM_SECONDS["unknown"]
+        )
+        if timestamp - self.candidate_since >= confirm_seconds:
             self.state = candidate
             self.since = timestamp
             self.candidate = None
@@ -106,6 +111,13 @@ class FaceAnalyzer:
         self.window_seconds = float(window_seconds)
         self.frames = deque()
         self.motion_samples = deque()
+        self.expression_state = ExpressionState()
+        self.blink_armed = False
+        self.last_blink_time = None
+
+    def reset(self):
+        self.frames.clear()
+        self.motion_samples.clear()
         self.expression_state = ExpressionState()
         self.blink_armed = False
         self.last_blink_time = None
@@ -495,7 +507,7 @@ class FaceAnalyzer:
         second_score = ranked[1][0]
         if (
             best_score >= cfg.EXPRESSION_MIN_SCORE[best_name]
-            and best_score - second_score >= cfg.EXPRESSION_MIN_MARGIN
+            and best_score - second_score >= cfg.EXPRESSION_MIN_MARGIN[best_name]
         ):
             return best_name
         expressive_max = max(scores[name] for name in ("happy", "sad", "angry", "surprised"))

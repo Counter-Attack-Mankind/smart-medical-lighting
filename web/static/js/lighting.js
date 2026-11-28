@@ -21,6 +21,29 @@
         node.className = `small mt-2 ${isError ? "text-danger" : "text-success"}`;
     }
 
+    function reasonText(reason) {
+        if (!reason) return "--";
+        const exact = {
+            "manual default": "手动默认照度",
+            "manual control": "手动控制",
+            "manual target": "用户手动设定",
+            "automatic fusion control": "自动融合控制",
+            "explicit rest intent": "识别到明确休息意图",
+            "insufficient information; holding illuminance": "信息不足，保持当前照度",
+        };
+        if (exact[reason]) return exact[reason];
+        if (reason.startsWith("confirmed state: ")) {
+            const state = reason.slice(17);
+            const states = {tense_active: "紧张烦躁", pleasant_active: "愉悦活跃", low_negative: "低落消沉", calm_relaxed: "平静放松", neutral: "中性过渡"};
+            return `已确认状态：${states[state] || state}`;
+        }
+        if (reason.startsWith("explicit request: ")) {
+            const request = reason.slice(18);
+            return `明确照明需求：${{off: "关灯", on: "开灯", brighter: "调亮", dimmer: "调暗"}[request] || request}`;
+        }
+        return reason;
+    }
+
     function setControlAvailability() {
         const disabled = !connected || requestInFlight;
         byId("mode-manual").disabled = disabled;
@@ -60,8 +83,8 @@
             byId("lighting-target").textContent = lighting.target_lux ?? "--";
         }
         byId("lighting-current").textContent = lighting.current_lux ?? "--";
-        byId("lighting-reason").textContent = lighting.reason || "--";
-        byId("lighting-status").textContent = lighting.status === "confirmed" ? "已确认" : (lighting.status === "pending" ? "待接入" : (lighting.status || "--"));
+        byId("lighting-reason").textContent = reasonText(lighting.reason);
+        byId("lighting-status").textContent = lighting.status === "confirmed" ? "已确认" : (lighting.status === "holding" ? "保持当前值" : (lighting.status || "--"));
         renderBulb(lighting.current_lux);
         setControlAvailability();
     }
@@ -132,5 +155,5 @@
         setControlAvailability();
     }
 
-    window.LightingControls = {bind, update, setConnected};
+    window.LightingControls = {bind, update, setConnected, reasonText};
 })();

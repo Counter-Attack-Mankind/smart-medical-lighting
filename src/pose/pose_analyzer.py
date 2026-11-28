@@ -103,6 +103,18 @@ class PoseAnalyzer:
         self.posture_unknown_since = None
         self.last_event = None
 
+    def reset(self):
+        self.frames.clear()
+        self.motion_samples.clear()
+        self.behavior_samples.clear()
+        self.posture_fsm = TimedState(cfg.POSTURE_CONFIRM_SECONDS)
+        self.motion_fsm = TimedState(cfg.MOTION_CONFIRM_SECONDS)
+        self.walk_fsm = TimedState(cfg.BEHAVIOR_CONFIRM_SECONDS)
+        self.pacing_fsm = TimedState(cfg.BEHAVIOR_CONFIRM_SECONDS)
+        self.repetitive_fsm = TimedState(cfg.BEHAVIOR_CONFIRM_SECONDS)
+        self.last_stable_posture = "unknown"
+        self.last_posture_time = self.posture_unknown_since = self.last_event = None
+
     def update(self, result, timestamp_ms, frame_shape):
         """Convert a MediaPipe result and append it to the time window."""
         timestamp = float(timestamp_ms) / 1000.0

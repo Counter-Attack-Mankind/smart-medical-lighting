@@ -1,17 +1,19 @@
 """Local FastAPI dashboard for the shared perception runtime."""
 
 import asyncio
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import system_config as cfg
 from src.system.perception_system import PerceptionSystem
+from src.system.media_source import MediaFileSource
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,6 +28,14 @@ class ManualLightingRequest(BaseModel):
         ge=cfg.MIN_SIMULATED_LUX,
         le=cfg.MAX_SIMULATED_LUX,
     )
+
+
+class SourceRequest(BaseModel):
+    type: Literal["live"]
+
+
+class PlaybackRequest(BaseModel):
+    action: Literal["play", "pause", "replay", "stop"]
 
 
 def create_app(perception_system=None, manage_lifespan=True):
@@ -111,6 +121,38 @@ def create_app(perception_system=None, manage_lifespan=True):
     async def set_manual_lighting(request: ManualLightingRequest):
         try:
             return {"lighting": system.set_manual_lux(request.lux)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @application.post("/api/source/live")
+    async def use_live_source(_request: SourceRequest):
+        return {"source": await asyncio.to_thread(system.select_source, "live")}
+
+    @application.post("/api/source/upload")
+    async def upload_source(request: Request, kind: Literal["video", "image"], filename: str):
+        suffix = Path(filename).suffix.lower()
+        allowed = MediaFileSource.VIDEO_EXTENSIONS if kind == "video" else MediaFileSource.IMAGE_EXTENSIONS
+        if suffix not in allowed:
+            raise HTTPException(status_code=415, detail="unsupported media extension")
+        upload_dir = BASE_DIR.parent / ".temp" / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        target = upload_dir / f"{uuid.uuid4().hex}{suffix}"
+        with target.open("wb") as output:
+            async for chunk in request.stream():
+                output.write(chunk)
+        try:
+            source = await asyncio.to_thread(system.select_source, kind, target, True, Path(filename).name)
+        except Exception as error:
+            target.unlink(missing_ok=True)
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"source": source}
+
+    @application.post("/api/source/control")
+    async def control_source(request: PlaybackRequest):
+        try:
+            return {"source": system.control_source(request.action)}
         except RuntimeError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:

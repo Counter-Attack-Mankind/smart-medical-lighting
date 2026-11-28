@@ -12,6 +12,7 @@
         transcribed: "已转写", untranscribed: "未获得转写", normal_intensity: "正常强度",
         high_intensity: "高强度", low_intensity: "低强度", walking: "行走", pacing_candidate: "踱步候选",
         repetitive_motion: "重复运动", standing_up: "起身", sitting_down: "坐下", manual: "手动", automatic: "自动",
+        pleasant_active: "愉悦活跃候选", tense_active: "紧张烦躁候选", low_negative: "低落消沉候选", calm_relaxed: "平静放松候选",
     };
     let chart = null;
     let socket = null;
@@ -21,6 +22,10 @@
 
     function translated(value) {
         return value === null || value === undefined ? "--" : (labels[value] || String(value));
+    }
+
+    function fusionMessage(value) {
+        return {"fusion active": "有效观测已融合", "waiting for new observation": "等待新观测"}[value] || value || "--";
     }
 
     function setConnection(connected, text, enableControls = connected) {
@@ -67,6 +72,7 @@
         byId("pose-fps").textContent = fmt(performance.pose_fps);
         byId("pose-ms").textContent = fmt(module.inference_ms);
         setProgress("pose-reliability", "pose-reliability-text", poseReliability(analysis?.reliability));
+        setProgress("pose-activity", "pose-activity-text", analysis?.activity_score);
     }
 
     function updateFace(module, performance) {
@@ -80,6 +86,9 @@
         byId("face-fps").textContent = fmt(performance.face_fps);
         byId("face-ms").textContent = fmt(module.inference_ms);
         setProgress("face-reliability", "face-reliability-text", analysis?.reliability?.score);
+        ["happy", "sad", "angry", "surprised", "neutral"].forEach((name) => {
+            setProgress(`face-score-${name}`, `face-score-${name}-text`, analysis?.expression_scores?.[name]);
+        });
     }
 
     function eventRows(events) {
@@ -100,7 +109,7 @@
         return node.innerHTML;
     }
 
-    function updateAudio(module) {
+    function updateAudio(module, semantic) {
         setBadge("audio-status", module);
         const analysis = module.analysis || null;
         byId("speech-active").textContent = analysis?.speech_active === true ? "检测到" : (analysis?.speech_active === false ? "未检测到" : "--");
@@ -137,6 +146,22 @@
         } else {
             byId("sound-events").innerHTML = eventRows(sound.events);
         }
+        const categoryNames = {
+            negative_emotion: "消极情绪表达", depressive_expression: "低落相关表达",
+            agitation: "烦躁或激越表达", self_harm_suicide: "自伤或自杀相关表达",
+            threat_conflict: "冲突或威胁表达", positive_emotion: "正向情绪表达",
+            rest_intent: "休息意图", lighting_request: "照明需求",
+        };
+        const categories = semantic?.categories || [];
+        byId("semantic-result").textContent = categories.length
+            ? categories.map((item) => `${categoryNames[item.category] || item.category}：${(item.matched_phrases || []).join("、")}`).join("；")
+            : "当前未匹配语义规则";
+        const alerts = semantic?.alerts || [];
+        const alertNode = byId("semantic-alert");
+        alertNode.classList.toggle("d-none", alerts.length === 0);
+        alertNode.textContent = alerts.length
+            ? `人工核查提示：${alerts.map((item) => `${categoryNames[item.category] || item.category}（匹配：${item.matched_phrases.join("、")}）`).join("；")}。该提示不代表诊断，也不直接参与自动灯光调节。`
+            : "";
     }
 
     const quadrantPlugin = {
@@ -182,12 +207,13 @@
 
     function updateFusion(fusion) {
         const available = Boolean(fusion?.available);
-        byId("fusion-status").textContent = available ? "可用" : "待接入";
-        byId("fusion-status").className = `badge ${available ? "bg-green-lt" : "bg-yellow-lt"}`;
+        const statusText = {confirmed: "已确认", pending: "待确认", insufficient: "信息不足", snapshot: "静态快照"}[fusion?.status];
+        byId("fusion-status").textContent = statusText || (available ? "可用" : "信息不足");
+        byId("fusion-status").className = `badge ${available && fusion?.status === "confirmed" ? "bg-green-lt" : "bg-yellow-lt"}`;
         byId("fusion-valence").textContent = fmt(fusion?.valence, 2);
         byId("fusion-arousal").textContent = fmt(fusion?.arousal, 2);
         byId("fusion-candidate").textContent = translated(fusion?.state_candidate);
-        byId("fusion-message").textContent = fusion?.message || "--";
+        byId("fusion-message").textContent = fusionMessage(fusion?.message);
         const base = fusion?.base_weights || {};
         const effectiveV = fusion?.effective_weights?.valence || {};
         const effectiveA = fusion?.effective_weights?.arousal || {};
@@ -265,7 +291,70 @@
         if (!Array.isArray(history) || !history.length) {
             body.innerHTML = '<tr><td colspan="3" class="text-center text-secondary">暂无记录</td></tr>'; return;
         }
-        body.innerHTML = history.map((item) => `<tr><td>${escapeHtml(item.time || item.timestamp || "--")}</td><td>${escapeHtml(item.event || "--")}</td><td class="text-end">${item.target_lux === null || item.target_lux === undefined ? "--" : `${escapeHtml(item.target_lux)} lux`}</td></tr>`).join("");
+        const eventText = (value) => {
+            if (!value) return "--";
+            if (value.startsWith("confirmed state: ")) return `已确认综合状态：${translated(value.slice(17))}`;
+            if (value.startsWith("source switched: ")) return `数据源已切换：${value.slice(17)}`;
+            if (value.startsWith("lighting mode: ")) return `照明模式：${translated(value.slice(15))}`;
+            if (value.startsWith("semantic alert: ")) {
+                const category = value.slice(16);
+                return {self_harm_suicide: "敏感语义需人工核查：自伤或自杀相关表达", threat_conflict: "敏感语义需人工核查：冲突或威胁表达"}[category] || "敏感语义需人工核查";
+            }
+            if (value === "manual illuminance adjusted") return "手动仿真照度已调整";
+            return window.LightingControls.reasonText(value);
+        };
+        body.innerHTML = history.map((item) => `<tr><td>${escapeHtml(item.time || item.timestamp || "--")}</td><td>${escapeHtml(eventText(item.event))}</td><td class="text-end">${item.target_lux === null || item.target_lux === undefined ? "--" : `${escapeHtml(item.target_lux)} lux`}</td></tr>`).join("");
+    }
+
+    async function postSource(url, body) {
+        const response = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        return data;
+    }
+
+    async function uploadSource(file, kind) {
+        if (!file) return;
+        byId("source-feedback").textContent = `正在载入并初始化分析：${file.name}`;
+        byId("source-feedback").className = "source-feedback px-3 pb-2 text-primary";
+        const url = `/api/source/upload?kind=${encodeURIComponent(kind)}&filename=${encodeURIComponent(file.name)}`;
+        const response = await fetch(url, {method: "POST", headers: {"Content-Type": "application/octet-stream"}, body: file});
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        updateSource(data.source);
+        byId("source-feedback").textContent = kind === "image" ? "图片已载入：仅分析当前静态画面，不累积时序状态。" : "视频已载入并开始分析，可使用暂停、重新播放和停止控制。";
+        byId("source-feedback").className = "source-feedback px-3 pb-2 text-success";
+    }
+
+    function updateSource(source) {
+        if (!source) return;
+        const position = Number(source.position_seconds || 0), duration = Number(source.duration_seconds || 0);
+        const progress = Number(source.progress);
+        byId("source-progress-bar").style.width = `${Number.isFinite(progress) ? Math.max(0, Math.min(100, progress * 100)) : 0}%`;
+        const audioNote = source.audio_status === "ffmpeg_unavailable" ? " / FFmpeg 不可用" : (source.audio_status === "no_audio_track" ? " / 无音轨" : (source.audio_status === "extraction_failed" ? " / 音轨提取失败" : ""));
+        const stateLabel = {playing: "播放中", paused: "已暂停", stopped: "已停止", finished: "播放结束", ready: "等待分析", analyzed: "静态分析完成"}[source.state] || source.state;
+        byId("source-status").textContent = `${source.name || source.type} / ${stateLabel}${duration ? ` / ${position.toFixed(1)}s / ${duration.toFixed(1)}s` : ""}${audioNote}`;
+        ["play", "pause", "replay", "stop"].forEach((action) => { byId(`source-${action}`).disabled = source.type !== "video"; });
+    }
+
+    function bindSourceControls() {
+        const failed = (error) => {
+            byId("source-feedback").textContent = `素材操作失败：${error.message}`;
+            byId("source-feedback").className = "source-feedback px-3 pb-2 text-danger";
+        };
+        byId("source-live").addEventListener("click", () => postSource("/api/source/live", {type: "live"}).then((data) => {
+            updateSource(data.source);
+            byId("source-feedback").textContent = "已切换到实时摄像头和麦克风。";
+            byId("source-feedback").className = "source-feedback px-3 pb-2 text-success";
+        }).catch(failed));
+        byId("source-video-file").addEventListener("change", (event) => uploadSource(event.target.files[0], "video").catch(failed).finally(() => { event.target.value = ""; }));
+        byId("source-image-file").addEventListener("change", (event) => uploadSource(event.target.files[0], "image").catch(failed).finally(() => { event.target.value = ""; }));
+        const actionText = {play: "视频已开始播放并继续分析。", pause: "视频已暂停；暂停期间不累积时序确认。", replay: "视频已重新播放，旧时序缓存已清除。", stop: "视频播放与分析已停止。"};
+        ["play", "pause", "replay", "stop"].forEach((action) => byId(`source-${action}`).addEventListener("click", () => postSource("/api/source/control", {action}).then((data) => {
+            updateSource(data.source);
+            byId("source-feedback").textContent = actionText[action];
+            byId("source-feedback").className = "source-feedback px-3 pb-2 text-secondary";
+        }).catch(failed)));
     }
 
     function updateDashboard(data) {
@@ -281,16 +370,17 @@
         byId("process-memory").textContent = `${fmt(performance.process_memory_mb)} MB`;
         updatePose(data.pose || {}, performance);
         updateFace(data.face || {}, performance);
-        updateAudio(data.audio || {});
+        updateAudio(data.audio || {}, data.fusion?.semantic || {});
         updateFusion(data.fusion || {});
         drawWaveform(data.waveform || {});
         window.LightingControls.update(data.lighting);
-        byId("summary-state").textContent = translated(data.fusion?.state_candidate);
-        byId("summary-hint").textContent = data.fusion?.message || "--";
+        byId("summary-state").textContent = translated(data.fusion?.confirmed_state || data.fusion?.state_candidate);
+        byId("summary-hint").textContent = fusionMessage(data.fusion?.message);
         byId("summary-lux").textContent = data.lighting?.current_lux ?? "--";
         byId("summary-mode").textContent = translated(data.lighting?.mode);
-        byId("summary-light-reason").textContent = data.lighting?.reason || "--";
+        byId("summary-light-reason").textContent = window.LightingControls.reasonText(data.lighting?.reason);
         updateHistory(data.history);
+        updateSource(data.source);
         const errors = data.system?.errors || {};
         const alert = byId("global-alert");
         const entries = Object.entries(errors);
@@ -316,6 +406,7 @@
 
     document.addEventListener("DOMContentLoaded", () => {
         window.LightingControls.bind();
+        bindSourceControls();
         initChart();
         connect();
         window.setInterval(() => {
